@@ -1,0 +1,61 @@
+# Routes
+GET           /                                                           controllers.HomeController.index
+
+# Documentation
+GET           /docs/*file                                                 controllers.Assets.at(path="/public/docs", file)
+
+# HTMX
+POST          /orders                                                     controllers.OrderController.createOrder
+GET           /orders                                                     controllers.OrderController.listOrders
+GET           /outbox/stats                                               controllers.OrderController.outboxStats
+PUT           /orders/:id/status                                          controllers.OrderController.updateStatus(id: Long)
+DELETE        /orders/:id/cancel                                          controllers.OrderController.cancelOrder(id: Long)
+DELETE        /orders/:id/delete                                          controllers.OrderController.deleteOrder(id: Long)
+
+# JSON API
+POST          /api/orders                                                 controllers.OrderController.createOrderJson
+GET           /api/orders                                                 controllers.OrderController.listOrdersJson
+GET           /api/outbox/stats                                           controllers.OrderController.outboxStatsJson
+GET           /api/outbox/events                                          controllers.OrderController.listAllEventsJson
+GET           /api/outbox/events/:id                                      controllers.OrderController.debugEventJson(id: Long)
+PUT           /api/orders/:id/status                                      controllers.OrderController.updateStatusJson(id: Long)
+DELETE        /api/orders/:id/cancel                                      controllers.OrderController.cancelOrderJson(id: Long)
+DELETE        /api/orders/:id                                             controllers.OrderController.deleteOrderJson(id: Long)
+
+# Webhook Simulator
+GET           /simulator/stats                                            controllers.WebhookSimulatorController.stats
+POST          /simulator/webhook/inventory                                controllers.WebhookSimulatorController.inventoryWebhook
+DELETE        /simulator/webhook/inventory/:id                            controllers.WebhookSimulatorController.inventoryRevert(id: String)
+POST          /simulator/webhook/shipping                                 controllers.WebhookSimulatorController.shippingWebhook
+POST          /simulator/webhook/shipping/:id/cancel                      controllers.WebhookSimulatorController.shippingRevert(id: String)
+POST          /simulator/webhook/billing                                  controllers.WebhookSimulatorController.billingWebhook
+POST          /simulator/webhook/billing/:id/refund                       controllers.WebhookSimulatorController.billingRevert(id: String)
+POST          /simulator/webhook/email                                    controllers.WebhookSimulatorController.alwaysFail
+POST          /simulator/webhook/email/:id/cancel                         controllers.WebhookSimulatorController.emailRevert(id: String)
+
+# Retry-After demo endpoints
+GET           /simulator/github/repos                                     controllers.WebhookSimulatorController.githubRateLimited
+POST          /simulator/stripe/charges                                   controllers.WebhookSimulatorController.stripeRateLimited
+POST          /simulator/custom/process                                   controllers.WebhookSimulatorController.customApiUnavailable
+
+# Conditional routing demo endpoints
+POST          /simulator/fraud/check                                      controllers.WebhookSimulatorController.fraudCheck
+POST          /simulator/webhook/domestic-shipping                        controllers.WebhookSimulatorController.domesticShippingWebhook
+POST          /simulator/webhook/domestic-shipping/:id/cancel             controllers.WebhookSimulatorController.domesticShippingRevert(id: String)
+POST          /simulator/webhook/international-shipping                   controllers.WebhookSimulatorController.internationalShippingWebhook
+POST          /simulator/webhook/international-shipping/:id/cancel        controllers.WebhookSimulatorController.internationalShippingRevert(id: String)
+POST          /simulator/webhook/high-value                               controllers.WebhookSimulatorController.highValueProcessing
+
+# Generic webhook endpoints (catch-all)
+POST          /simulator/webhook/*path                                    controllers.WebhookSimulatorController.webhook(path: String)
+PUT           /simulator/webhook/*path                                    controllers.WebhookSimulatorController.webhook(path: String)
+PATCH         /simulator/webhook/*path                                    controllers.WebhookSimulatorController.webhook(path: String)
+DELETE        /simulator/webhook/*path                                    controllers.WebhookSimulatorController.webhook(path: String)
+
+# Test endpoints
+POST          /simulator/always-succeed                                   controllers.WebhookSimulatorController.alwaysSucceed
+PUT           /simulator/always-succeed                                   controllers.WebhookSimulatorController.alwaysSucceed
+POST          /simulator/always-fail                                      controllers.WebhookSimulatorController.alwaysFail
+POST          /simulator/always-400                                       controllers.WebhookSimulatorController.alwaysBadRequest
+POST          /simulator/always-429                                       controllers.WebhookSimulatorController.alwaysRateLimited
+POST          /simulator/always-503                                       controllers.WebhookSimulatorController.alwaysUnavailable

@@ -1,0 +1,412 @@
+@()(implicit request: RequestHeader, token: play.filters.csrf.CSRF.Token)
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Outbox Pattern Demo</title>
+        <script src="https://unpkg.com/htmx.org@@1.9.10"></script>
+        <meta name="csrf-token" content="@token.value">
+        <script>
+                // Add CSRF token to all HTMX requests
+                document.addEventListener('DOMContentLoaded', function () {
+                    document.body.addEventListener('htmx:configRequest', function (evt) {
+                        evt.detail.headers['Csrf-Token'] = '@token.value';
+                    });
+
+                    // Disable create order button when orders exist
+                    function updateCreateOrderButton() {
+                        const ordersDiv = document.getElementById('orders');
+                        const createBtn = document.getElementById('create-order-btn');
+                        const orderHint = document.getElementById('order-hint');
+                        const responseDiv = document.getElementById('response');
+
+                        if (!ordersDiv || !createBtn) return;
+
+                        // Check if there are any order items in the orders list
+                        const hasOrders = ordersDiv.querySelector('.order-item') !== null;
+
+                        if (hasOrders) {
+                            createBtn.disabled = true;
+                            orderHint.style.display = 'block';
+                            // Clear any success message when disabling
+                            if (responseDiv && responseDiv.textContent.includes('created successfully')) {
+                                responseDiv.innerHTML = '';
+                            }
+                        } else {
+                            createBtn.disabled = false;
+                            orderHint.style.display = 'none';
+                        }
+                    }
+
+                    // Update button state when orders list changes
+                    document.body.addEventListener('htmx:afterSwap', function (evt) {
+                        if (evt.detail.target.id === 'orders') {
+                            updateCreateOrderButton();
+                        }
+                    });
+
+                    // Also check on page load
+                    setTimeout(updateCreateOrderButton, 500);
+                });
+        </script>
+        <style>
+                * {
+                    margin: 0;
+                    padding: 0;
+                    box-sizing: border-box;
+                }
+
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                    padding: 2rem;
+                }
+
+                .container {
+                    max-width: 1200px;
+                    margin: 0 auto;
+                }
+
+                h1 {
+                    color: white;
+                    text-align: center;
+                    margin-bottom: 0.5rem;
+                    font-size: 2.5rem;
+                }
+
+                .container > p {
+                    color: white;
+                    text-align: center;
+                    margin-bottom: 2rem;
+                    font-size: 1.1rem;
+                    opacity: 0.9;
+                    font-weight: 300;
+                }
+
+                .grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+                    gap: 1.5rem;
+                    margin-bottom: 2rem;
+                }
+
+                .card {
+                    background: white;
+                    border-radius: 12px;
+                    padding: 1.5rem;
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                }
+
+                h2 {
+                    color: #667eea;
+                    margin-bottom: 1rem;
+                    font-size: 1.5rem;
+                }
+
+                .stat-grid {
+                    display: grid;
+                    grid-template-columns: 1fr 1fr;
+                    gap: 1rem;
+                }
+
+                .stat {
+                    background: #f7fafc;
+                    padding: 1rem;
+                    border-radius: 8px;
+                    text-align: center;
+                }
+
+                .stat-value {
+                    font-size: 2rem;
+                    font-weight: bold;
+                    color: #667eea;
+                }
+
+                .stat-label {
+                    color: #718096;
+                    font-size: 0.875rem;
+                    margin-top: 0.5rem;
+                }
+
+                .form-group {
+                    margin-bottom: 1rem;
+                }
+
+                label {
+                    display: block;
+                    margin-bottom: 0.5rem;
+                    color: #4a5568;
+                    font-weight: 500;
+                }
+
+                input, select {
+                    width: 100%;
+                    padding: 0.75rem;
+                    border: 2px solid #e2e8f0;
+                    border-radius: 8px;
+                    font-size: 1rem;
+                    transition: border-color 0.2s;
+                }
+
+                input:focus, select:focus {
+                    outline: none;
+                    border-color: #667eea;
+                }
+
+                button {
+                    width: 100%;
+                    padding: 0.75rem 1.5rem;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 1rem;
+                    font-weight: 600;
+                    cursor: pointer;
+                    transition: transform 0.2s, box-shadow 0.2s;
+                }
+
+                button:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+                }
+
+                button:active {
+                    transform: translateY(0);
+                }
+
+                button:disabled {
+                    opacity: 0.6;
+                    cursor: not-allowed;
+                }
+
+                .btn-secondary {
+                    background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+                }
+
+                .btn-danger {
+                    background: linear-gradient(135deg, #f56565 0%, #c53030 100%);
+                }
+
+                #response {
+                    margin-top: 1rem;
+                    padding: 1rem;
+                    border-radius: 8px;
+                    background: #f7fafc;
+                    min-height: 50px;
+                }
+
+                .success {
+                    background: #c6f6d5;
+                    color: #22543d;
+                    padding: 0.75rem;
+                    border-radius: 8px;
+                }
+
+                .error {
+                    background: #fed7d7;
+                    color: #742a2a;
+                    padding: 0.75rem;
+                    border-radius: 8px;
+                }
+
+                .orders-list {
+                    max-height: 400px;
+                    overflow-y: auto;
+                }
+
+                .order-item {
+                    background: #f7fafc;
+                    padding: 1rem;
+                    margin-bottom: 0.75rem;
+                    border-radius: 8px;
+                    border-left: 4px solid #667eea;
+                }
+
+                .order-header {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    margin-bottom: 0.5rem;
+                }
+
+                .order-id {
+                    font-weight: bold;
+                    color: #667eea;
+                }
+
+                .order-status {
+                    padding: 0.25rem 0.75rem;
+                    border-radius: 12px;
+                    font-size: 0.75rem;
+                    font-weight: 600;
+                    text-transform: uppercase;
+                }
+
+                .status-pending {
+                    background: #feebc8;
+                    color: #7c2d12;
+                }
+
+                .status-processing {
+                    background: #bee3f8;
+                    color: #1e4e8c;
+                }
+
+                .status-shipped {
+                    background: #c6f6d5;
+                    color: #22543d;
+                }
+
+                .status-delivered {
+                    background: #d6bcfa;
+                    color: #44337a;
+                }
+
+                .status-cancelled {
+                    background: #fed7d7;
+                    color: #742a2a;
+                }
+
+                .order-actions {
+                    display: flex;
+                    gap: 0.5rem;
+                    margin-top: 0.75rem;
+                }
+
+                .order-actions button {
+                    flex: 1;
+                    padding: 0.5rem;
+                    font-size: 0.875rem;
+                }
+
+                .htmx-indicator {
+                    display: none;
+                }
+
+                .htmx-request .htmx-indicator {
+                    display: inline-block;
+                }
+
+                .htmx-request.htmx-indicator {
+                    display: inline-block;
+                }
+
+                .loading {
+                    opacity: 0.6;
+                }
+
+                .nav-bar {
+                    background: rgba(255, 255, 255, 0.1);
+                    backdrop-filter: blur(10px);
+                    border-radius: 12px;
+                    padding: 1rem;
+                    margin-bottom: 2rem;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }
+
+                .nav-links {
+                    display: flex;
+                    gap: 1rem;
+                    align-items: center;
+                }
+
+                .nav-link {
+                    color: white;
+                    text-decoration: none;
+                    padding: 0.5rem 1rem;
+                    border-radius: 8px;
+                    background: rgba(255, 255, 255, 0.1);
+                    transition: background 0.2s, transform 0.2s;
+                    font-weight: 500;
+                    display: flex;
+                    align-items: center;
+                    gap: 0.5rem;
+                }
+
+                .nav-link:hover {
+                    background: rgba(255, 255, 255, 0.2);
+                    transform: translateY(-2px);
+                }
+
+                .nav-link svg {
+                    width: 20px;
+                    height: 20px;
+                }
+
+                .logo {
+                    color: white;
+                    font-weight: 600;
+                    font-size: 1.2rem;
+                }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🎭 Pekko Actors for Background Processing</h1>
+            <p>Play Framework + Transactional Outbox Pattern + Saga Pattern</p>
+            <div class="grid">
+                <div class="card">
+                    <h2>Outbox Statistics</h2>
+                    <div id="stats" hx-get="/outbox/stats" hx-trigger="load, every 2s" hx-swap="innerHTML">
+                        <div class="stat-grid">
+                            <div class="stat">
+                                <div class="stat-value">-</div>
+                                <div class="stat-label">Pending Events</div>
+                            </div>
+                            <div class="stat">
+                                <div class="stat-value">-</div>
+                                <div class="stat-label">Processed Events</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>Create Order</h2>
+                    <form id="create-order-form" hx-post="/orders" hx-target="#response" hx-swap="innerHTML">
+                        <input type="hidden" name="@token.name" value="@token.value">
+                        <div class="form-group">
+                            <label for="customerId">Customer ID</label>
+                            <input type="text" id="customerId" name="customerId" value="customer-123" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="totalAmount">Total Amount</label>
+                            <input type="number" id="totalAmount" name="totalAmount" value="99.99" step="0.01" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="shippingType">Shipping Type</label>
+                            <select id="shippingType" name="shippingType" required>
+                                <option value="domestic">Domestic</option>
+                                <option value="international">International</option>
+                            </select>
+                        </div>
+                        <button id="create-order-btn" type="submit">Create Order</button>
+                    </form>
+                    <div id="response"></div>
+                    <div id="order-hint" style="margin-top: 1rem;
+                        padding: 0.75rem;
+                        background: #FEF3C7;
+                        color: #92400E;
+                        border-radius: 8px;
+                        font-size: 0.875rem;
+                        display: none;">
+                        Please remove the current order before creating a new one
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Recent Orders</h2>
+                <div id="orders" hx-get="/orders" hx-trigger="load, every 3s" hx-swap="innerHTML">
+                    <p style="color: #718096;
+                        text-align: center;
+                        padding: 2rem;">Loading orders...</p>
+                </div>
+            </div>
+        </div>
+    </body>
+</html>
