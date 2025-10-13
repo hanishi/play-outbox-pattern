@@ -1,0 +1,21 @@
+# Routes
+GET           /                                  controllers.HomeController.index
+
+# HTMX
+POST          /orders/create                 controllers.OrderController.createOrder
+GET           /orders/list                   controllers.OrderController.listOrders
+GET           /outbox/stats                  controllers.OrderController.outboxStats
+PUT           /orders/:id/status        controllers.OrderController.updateStatus(id: Long)
+DELETE        /orders/:id/cancel        controllers.OrderController.cancelOrder(id: Long)
+DELETE        /orders/:id/delete        controllers.OrderController.deleteOrder(id: Long)
+
+# Webhook Simulator
+GET           /simulator/stats                   controllers.WebhookSimulatorController.stats
+POST          /simulator/webhook/*path           controllers.WebhookSimulatorController.webhook(path: String)
+PUT           /simulator/webhook/*path           controllers.WebhookSimulatorController.webhook(path: String)
+PATCH         /simulator/webhook/*path           controllers.WebhookSimulatorController.webhook(path: String)
+DELETE        /simulator/webhook/*path           controllers.WebhookSimulatorController.webhook(path: String)
+POST          /simulator/always-succeed          controllers.WebhookSimulatorController.alwaysSucceed
+PUT           /simulator/always-succeed          controllers.WebhookSimulatorController.alwaysSucceed
+POST          /simulator/always-fail             controllers.WebhookSimulatorController.alwaysFail
+POST          /simulator/always-400              controllers.WebhookSimulatorController.alwaysBadRequest
