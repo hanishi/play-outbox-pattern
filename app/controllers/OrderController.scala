@@ -32,7 +32,7 @@ class OrderController @Inject() (
     val order = Order(
       customerId  = customerId,
       totalAmount = totalAmount,
-      status      = "PENDING",
+      orderStatus = "PENDING",
       createdAt   = Instant.now(),
       updatedAt   = Instant.now()
     )
@@ -83,6 +83,17 @@ class OrderController @Inject() (
       }
   }
 
+  def deleteOrder(id: Long): Action[AnyContent] = Action.async { request =>
+    orderService
+      .deleteOrder(id)
+      .flatMap { _ =>
+        listOrders.apply(request)
+      }
+      .recover { case ex =>
+        Ok(s"""<div class="error">Error: ${ex.getMessage}</div>""").as("text/html")
+      }
+  }
+
   def listOrders: Action[AnyContent] = Action.async {
     orderService
       .listOrders(10, 0)
@@ -95,7 +106,7 @@ class OrderController @Inject() (
         } else {
           val html = orders
             .map { order =>
-              val isFinal      = order.status == "SHIPPED" || order.status == "CANCELLED"
+              val isFinal      = order.orderStatus == "SHIPPED" || order.orderStatus == "CANCELLED"
               val disabledAttr = if (isFinal) "disabled" else ""
               val buttonsHtml  =
                 if (isFinal) s"""
@@ -115,7 +126,7 @@ class OrderController @Inject() (
           <div class="order-item">
             <div class="order-header">
               <span class="order-id">Order #${order.id}</span>
-              <span class="order-status status-${order.status.toLowerCase}">${order.status}</span>
+              <span class="order-status status-${order.orderStatus.toLowerCase}">${order.orderStatus}</span>
             </div>
             <div style="color: #718096; font-size: 0.875rem;">
               <div>Customer: ${order.customerId}</div>
@@ -132,17 +143,6 @@ class OrderController @Inject() (
       }
       .recover { case ex =>
         Ok(s"""<div class="error">Error loading orders: ${ex.getMessage}</div>""").as("text/html")
-      }
-  }
-
-  def deleteOrder(id: Long): Action[AnyContent] = Action.async { request =>
-    orderService
-      .deleteOrder(id)
-      .flatMap { _ =>
-        listOrders.apply(request)
-      }
-      .recover { case ex =>
-        Ok(s"""<div class="error">Error: ${ex.getMessage}</div>""").as("text/html")
       }
   }
 

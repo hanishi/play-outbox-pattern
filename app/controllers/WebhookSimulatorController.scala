@@ -2,20 +2,19 @@ package controllers
 
 import play.api.libs.json.*
 import play.api.mvc.*
-import play.api.{Configuration, Logging}
+import play.api.{ Configuration, Logging }
 
 import javax.inject.*
 import scala.util.Random
 
-/**
- * Simulates external webhook endpoints for testing the outbox pattern.
- *
- * Features:
- * - Random failures (configurable rate)
- * - Slow responses (configurable delay)
- * - Request logging
- * - Different response codes
- */
+/** Simulates external webhook endpoints for testing the outbox pattern.
+  *
+  * Features:
+  * - Random failures (configurable rate)
+  * - Slow responses (configurable delay)
+  * - Request logging
+  * - Different response codes
+  */
 @Singleton
 class WebhookSimulatorController @Inject() (
     cc: ControllerComponents,
@@ -39,19 +38,18 @@ class WebhookSimulatorController @Inject() (
     .getOptional[Int]("simulator.slowResponseDelayMs")
     .getOrElse(2000) // 2 second delay
 
-  /**
-   * Generic webhook endpoint that randomly fails.
-   *
-   * Possible responses:
-   * - 200 OK (success)
-   * - 400 Bad Request (non-retryable)
-   * - 500 Internal Server Error (retryable)
-   * - 503 Service Unavailable (retryable)
-   * - Slow response (tests timeouts)
-   */
+  /** Generic webhook endpoint that randomly fails.
+    *
+    * Possible responses:
+    * - 200 OK (success)
+    * - 400 Bad Request (non-retryable)
+    * - 500 Internal Server Error (retryable)
+    * - 503 Service Unavailable (retryable)
+    * - Slow response (tests timeouts)
+    */
   def webhook(path: String): Action[JsValue] = Action.async(parse.json) { request =>
-    val eventId = request.headers.get("X-Event-Id").getOrElse("unknown")
-    val eventType = request.headers.get("X-Event-Type").getOrElse("unknown")
+    val eventId     = request.headers.get("X-Event-Id").getOrElse("unknown")
+    val eventType   = request.headers.get("X-Event-Type").getOrElse("unknown")
     val aggregateId = request.headers.get("X-Aggregate-Id").getOrElse("unknown")
 
     logger.info(
@@ -62,7 +60,9 @@ class WebhookSimulatorController @Inject() (
 
     // Simulate slow response
     if (random.nextDouble() < slowResponseRate) {
-      logger.warn(s"[WEBHOOK] Simulating slow response ($slowResponseDelayMs ms) for event $eventId")
+      logger.warn(
+        s"[WEBHOOK] Simulating slow response ($slowResponseDelayMs ms) for event $eventId"
+      )
       Thread.sleep(slowResponseDelayMs)
     }
 
@@ -122,9 +122,8 @@ class WebhookSimulatorController @Inject() (
     scala.concurrent.Future.successful(response)
   }
 
-  /**
-   * Always succeeds - useful for testing success scenarios.
-   */
+  /** Always succeeds - useful for testing success scenarios.
+    */
   def alwaysSucceed: Action[JsValue] = Action(parse.json) { request =>
     val eventId = request.headers.get("X-Event-Id").getOrElse("unknown")
     logger.info(s"[WEBHOOK-SUCCESS] Received event $eventId")
@@ -138,9 +137,8 @@ class WebhookSimulatorController @Inject() (
     )
   }
 
-  /**
-   * Always fails with 500 - useful for testing retry logic.
-   */
+  /** Always fails with 500 - useful for testing retry logic.
+    */
   def alwaysFail: Action[JsValue] = Action(parse.json) { request =>
     val eventId = request.headers.get("X-Event-Id").getOrElse("unknown")
     logger.error(s"[WEBHOOK-FAIL] Received event $eventId - returning 500")
@@ -154,9 +152,8 @@ class WebhookSimulatorController @Inject() (
     )
   }
 
-  /**
-   * Always returns 400 - useful for testing non-retryable errors.
-   */
+  /** Always returns 400 - useful for testing non-retryable errors.
+    */
   def alwaysBadRequest: Action[JsValue] = Action(parse.json) { request =>
     val eventId = request.headers.get("X-Event-Id").getOrElse("unknown")
     logger.error(s"[WEBHOOK-BAD-REQUEST] Received event $eventId - returning 400")
@@ -170,9 +167,8 @@ class WebhookSimulatorController @Inject() (
     )
   }
 
-  /**
-   * Returns stats about received webhooks.
-   */
+  /** Returns stats about received webhooks.
+    */
   def stats: Action[AnyContent] = Action {
     Ok(
       Json.obj(

@@ -9,7 +9,7 @@
         <meta name="csrf-token" content="@token.value">
         <script>
                 // Add CSRF token to all HTMX requests
-                document.addEventListener('DOMContentLoaded', function() {
+                document.addEventListener('DOMContentLoaded', function () {
                     document.body.addEventListener('htmx:configRequest', function (evt) {
                         evt.detail.headers['Csrf-Token'] = '@token.value';
                     });

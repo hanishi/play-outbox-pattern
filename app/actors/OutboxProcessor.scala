@@ -2,31 +2,140 @@ package actors
 
 import actors.OutboxProcessor.Command
 import models.OutboxEvent
+import org.apache.pekko.Done
 import org.apache.pekko.actor.typed.*
 import org.apache.pekko.actor.typed.scaladsl.*
+import org.apache.pekko.stream.scaladsl.{ Keep, RestartSource, Sink, Source }
+import org.apache.pekko.stream.{ KillSwitches, RestartSettings, UniqueKillSwitch }
+import org.postgresql.PGConnection
+import play.api.Logger
 import publishers.{ EventPublisher, PublishResult }
 import repositories.OutboxRepository
-import slick.dbio.DBIO
 import slick.jdbc.JdbcBackend.Database
 
+import java.sql.Connection
 import scala.concurrent.*
 import scala.concurrent.duration.*
-import scala.util.{ Failure, Success }
+import scala.util.control.Exception.*
+import scala.util.{ Failure, Success, Try, Using }
 
 object OutboxProcessor {
+  private val logger = Logger(this.getClass)
 
   def apply(
       db: Database,
       publisher: EventPublisher,
       outboxRepo: OutboxRepository,
-      pollInterval: FiniteDuration = 5.seconds,
-      batchSize: Int               = 100
+      pollInterval: FiniteDuration    = 5.seconds,
+      batchSize: Int                  = 100,
+      maxRetries: Int                 = 2,
+      useListenNotify: Boolean        = false,
+      staleCleanupEnabled: Boolean    = true,
+      staleTimeoutMinutes: Int        = 5,
+      cleanupInterval: FiniteDuration = 1.minute
   ): Behavior[Command] = Behaviors.setup { context =>
-    context.log.info("OutboxProcessor starting")
+    logger.info(s"OutboxProcessor.apply() called, useListenNotify=$useListenNotify")
+    context.log.info(
+      s"OutboxProcessor starting (maxRetries: $maxRetries, useListenNotify: $useListenNotify)"
+    )
+
+    // Start PostgreSQL LISTEN/NOTIFY stream if enabled
+    val listenKillSwitch: Option[UniqueKillSwitch] =
+      if (useListenNotify) {
+        logger.info("STARTING LISTEN/NOTIFY SETUP")
+        given ActorSystem[Nothing] = context.system
+        given ExecutionContext     = context.system.dispatchers.lookup(
+          DispatcherSelector.fromConfig("blocking-jdbc")
+        )
+
+        def openConnection(): (Connection, PGConnection) = {
+          logger.debug("openConnection() called")
+          val conn = db.source.createConnection()
+          conn.setAutoCommit(true)
+          val pg = conn.unwrap(classOf[PGConnection])
+          Using.resource(conn.createStatement())(_.execute("LISTEN outbox_events_channel"))
+          logger.debug("Connection opened")
+          (conn, pg)
+        }
+
+        def closeConnection(conn: Connection): Done = {
+          Try(Using.resource(conn.createStatement())(_.execute("UNLISTEN *")))
+          Try(conn.close())
+          Done
+        }
+
+        val restartSettings     = RestartSettings(500.millis, 30.seconds, 0.2)
+        val (killSwitch, doneF) = RestartSource
+          .withBackoff(restartSettings) { () =>
+            Source
+              .unfoldResourceAsync[Seq[Long], Connection](
+                create = () =>
+                  Future {
+                    catching(classOf[Throwable])
+                      .withApply { ex =>
+                        logger.error(s"ERROR in openConnection: $ex", ex)
+                        throw ex
+                      }
+                      .apply(openConnection()._1)
+                  },
+                read = conn =>
+                  Future {
+                    val pg            = conn.unwrap(classOf[PGConnection])
+                    val notifications = Option(pg.getNotifications(200)).toList.flatten
+                    val eventIds      = notifications
+                      .filter(_.getName == "outbox_events_channel")
+                      .flatMap(n => Try(n.getParameter.toLong).toOption)
+
+                    if (eventIds.nonEmpty) {
+                      logger.info(
+                        s"LISTEN: got ${eventIds.length} event IDs: ${eventIds.mkString(", ")}"
+                      )
+                    }
+
+                    // Always keep stream alive, emit event IDs when available
+                    Some(eventIds)
+                  },
+                close = conn => Future(closeConnection(conn))
+              )
+              .filter(_.nonEmpty) // Only emit when we have event IDs
+          }
+          .viaMat(KillSwitches.single)(Keep.right)
+          .map { eventIds =>
+            logger.debug(
+              s"Triggering processing for ${eventIds.length} events: ${eventIds.take(5).mkString(", ")}..."
+            )
+            ProcessUnhandledEvent
+          }
+          .toMat(Sink.foreach(msg => context.self ! msg))(Keep.both)
+          .run()
+
+        doneF.onComplete {
+          case Success(_) =>
+            logger.info("LISTEN stream completed (will restart automatically)")
+          case Failure(ex) =>
+            logger.error(s"LISTEN stream failed $ex", ex)
+        }(context.executionContext)
+
+        logger.info("Started PostgreSQL LISTEN/NOTIFY stream")
+        Some(killSwitch)
+      } else {
+        None
+      }
 
     Behaviors.withTimers { timers =>
-      Behaviors.withStash(100) { stash =>
-        timers.startSingleTimer(ProcessUnhandledEvent, 1.second)
+      Behaviors.withStash(Int.MaxValue) { stash =>
+        // Only start polling timer if LISTEN/NOTIFY is disabled
+        if (!useListenNotify) {
+          timers.startSingleTimer(ProcessUnhandledEvent, 1.second)
+        }
+
+        // Start stale event cleanup timer if enabled
+        if (staleCleanupEnabled) {
+          timers.startTimerWithFixedDelay(PerformStaleCleanup, cleanupInterval)
+          context.log.info(
+            s"Stale event cleanup enabled (timeout: $staleTimeoutMinutes minutes, interval: $cleanupInterval)"
+          )
+        }
 
         new OutboxProcessor(
           db,
@@ -34,6 +143,10 @@ object OutboxProcessor {
           outboxRepo,
           pollInterval,
           batchSize,
+          maxRetries,
+          useListenNotify,
+          staleTimeoutMinutes,
+          listenKillSwitch,
           context,
           stash,
           timers
@@ -44,17 +157,30 @@ object OutboxProcessor {
 
   sealed trait Command
 
-  case class Stop(replyTo: ActorRef[Stopped.type]) extends Command
+  final case class Stats(processed: Int, failed: Int, fetched: Int) {
+    def +(success: Boolean): Stats =
+      if (success) copy(processed = processed + 1) else copy(failed = failed + 1)
+  }
 
-  case class ProcessEvent(id: Long, replyTo: ActorRef[Long]) extends Command
+  final case class Stop(replyTo: ActorRef[Stopped.type]) extends Command
 
-  private case class ProcessingComplete(processed: Int, failed: Int) extends Command
+  private final case class ProcessingComplete(stats: Stats) extends Command
 
-  private case class ProcessingFailed(ex: Throwable) extends Command
+  private final case class ProcessingFailed(ex: Throwable) extends Command
+
+  private final case class CleanupComplete(count: Int) extends Command
+
+  private final case class CleanupFailed(ex: Throwable) extends Command
+
+  object Stats {
+    def apply(fetched: Int): Stats = Stats(0, 0, fetched)
+  }
 
   case object Stopped
 
   case object ProcessUnhandledEvent extends Command
+
+  private case object PerformStaleCleanup extends Command
 }
 
 class OutboxProcessor(
@@ -63,6 +189,10 @@ class OutboxProcessor(
     outboxRepo: OutboxRepository,
     pollInterval: FiniteDuration,
     batchSize: Int,
+    maxRetries: Int,
+    useListenNotify: Boolean,
+    staleTimeoutMinutes: Int,
+    listenKillSwitch: Option[UniqueKillSwitch],
     context: ActorContext[OutboxProcessor.Command],
     stash: StashBuffer[OutboxProcessor.Command],
     timers: TimerScheduler[Command]
@@ -70,65 +200,124 @@ class OutboxProcessor(
 
   import OutboxProcessor.*
 
-  private implicit val ec: ExecutionContext = context.executionContext
-  private val log                           = context.log
+  private val log = context.log
+  // handlers for cleanup operations
+  private val cleanupHandler: PartialFunction[Command, Behavior[Command]] = {
+    case PerformStaleCleanup =>
+      context.log.debug("Starting stale event cleanup")
+      performStaleCleanup()
+      Behaviors.same
+    case CleanupComplete(count) =>
+      if (count > 0) {
+        context.log.info(s"Successfully reset $count stale events to PENDING")
+      }
+      Behaviors.same
+    case CleanupFailed(ex) =>
+      context.log.error("Failed to run stale event cleanup", ex)
+      Behaviors.same
+  }
+  // handler for graceful shutdown
+  private val stopHandler: PartialFunction[Command, Behavior[Command]] = { case Stop(replyTo) =>
+    context.log.info("Stopping")
+    timers.cancelAll()
+    listenKillSwitch.foreach(_.shutdown())
+    replyTo ! Stopped
+    Behaviors.stopped
+  }
+
+  private given ExecutionContext = context.executionContext
+
+  private def scheduleNext(): Unit =
+    // Only schedule next poll if LISTEN/NOTIFY is disabled
+    if (!useListenNotify) {
+      timers.startSingleTimer(ProcessUnhandledEvent, pollInterval)
+    }
+
+  private def pipeToSelf[T](fut: => Future[T])(onSuccess: T => Command): Unit =
+    context.pipeToSelf(fut) {
+      case Success(v) => onSuccess(v)
+      case Failure(ex) => ProcessingFailed(ex)
+    }
 
   private def idle: Behavior[Command] = Behaviors.receiveMessage {
-    case ProcessEvent(id, replyTo) =>
-      context.log.debug(s"Processing outbox event: $id")
-      context.pipeToSelf(processOutbox(id)) {
-        case Success((processed, failed)) => ProcessingComplete(processed, failed)
-        case Failure(ex) => ProcessingFailed(ex)
-      }
-      replyTo ! id
-      processing
     case ProcessUnhandledEvent =>
+      context.log.debug("Received ProcessUnhandledEvent in IDLE state")
       context.log.debug("Processing unhandled outbox events")
-      context.pipeToSelf(processOutboxBatch()) {
-        case Success((processed, failed)) => ProcessingComplete(processed, failed)
-        case Failure(ex) => ProcessingFailed(ex)
-      }
-      processing
-    case Stop(replyTo) =>
-      context.log.info("Stopping")
-      timers.cancelAll()
-      replyTo ! Stopped
-      Behaviors.stopped
+      pipeToSelf(processOutboxBatch())(stats => ProcessingComplete(stats))
+      stash.unstashAll(processing)
     case other =>
-      stash.stash(other)
-      Behaviors.same
+      cleanupHandler
+        .orElse(stopHandler)
+        .applyOrElse(
+          other,
+          command => {
+            stash.stash(command)
+            Behaviors.same
+          }
+        )
   }
 
   private def processing: Behavior[Command] = Behaviors.receiveMessage {
-    case ProcessingComplete(processed, failed) =>
-      if (processed > 0 || failed > 0) {
-        context.log.info(s"Processed: $processed, Failed: $failed")
+    case ProcessingComplete(stats) =>
+      if (stats.processed > 0 || stats.failed > 0) {
+        context.log.info(
+          s"Batch complete - Fetched: ${stats.fetched}, Processed: ${stats.processed}, Failed: ${stats.failed}"
+        )
       }
-      timers.startSingleTimer(ProcessUnhandledEvent, pollInterval)
+
+      // If we fetched a full batch, there might be more events waiting
+      // Schedule immediate reprocessing to drain the queue completely
+      if (stats.fetched >= batchSize) {
+        context.log.info(
+          s"Full batch fetched (${stats.fetched}/${batchSize}), draining queue immediately"
+        )
+        timers.startSingleTimer(ProcessUnhandledEvent, 100.millis)
+      } else if (!useListenNotify) {
+        // Only schedule polling if LISTEN/NOTIFY is disabled and queue is drained
+        context.log.debug(s"Queue drained (${stats.fetched}/${batchSize}), scheduling next poll")
+        scheduleNext()
+      } else {
+        // LISTEN/NOTIFY mode and queue is drained - wait for notifications
+        context.log.debug(
+          s"Queue drained (${stats.fetched}/${batchSize}), waiting for notifications"
+        )
+      }
+
       stash.unstashAll(idle)
     case ProcessingFailed(ex) =>
       context.log.error("Processing failed", ex)
-      timers.startSingleTimer(ProcessUnhandledEvent, pollInterval)
+      scheduleNext()
       stash.unstashAll(idle)
-    case Stop(replyTo) =>
-      context.log.info("Stopping while processing")
-      timers.cancelAll()
-      replyTo ! Stopped
-      Behaviors.stopped
     case other =>
-      stash.stash(other)
-      Behaviors.same
+      cleanupHandler
+        .orElse(stopHandler)
+        .applyOrElse(
+          other,
+          command => {
+            stash.stash(command)
+            Behaviors.same
+          }
+        )
   }
 
-  private def processOutboxBatch(): Future[(Int, Int)] = for {
-    event <- db.run(outboxRepo.findUnprocessed(batchSize))
-    results <- Future.sequence(event.map(processEvent))
-  } yield (results.count(_ == true), results.count(_ == false))
-
-  private def processOutbox(id: Long): Future[(Int, Int)] = for {
-    event <- db.run(outboxRepo.find(id))
-    result <- processEvent(event)
-  } yield if (result) (1, 0) else (0, 1)
+  private def processOutboxBatch(): Future[Stats] = {
+    logger.info(s"Fetching up to $batchSize unprocessed events")
+    db.run(outboxRepo.findAndClaimUnprocessed(batchSize))
+      .flatMap { events =>
+        val fetchedCount = events.length
+        logger.info(s"Fetched $fetchedCount events from database")
+        if (fetchedCount > 0) {
+          logger.info(s"Event IDs: ${events.map(_.id).mkString(", ")}")
+        }
+        Future.traverse(events)(processEvent).map { results =>
+          results.foldLeft(Stats(fetchedCount))(_ + _)
+        }
+      }
+      .recoverWith { case ex =>
+        logger.error("Error fetching events", ex)
+        Future.failed(ex)
+      }
+  }
 
   private def processEvent(event: OutboxEvent): Future[Boolean] = publisher
     .publish(event)
@@ -150,22 +339,22 @@ class OutboxProcessor(
 
   private def handleRetryableFailure(event: OutboxEvent, error: String): Future[Boolean] = {
 
+    val nextCount = event.retryCount + 1
+    val shouldDLQ = nextCount >= maxRetries
+
     val action = for {
       _ <- outboxRepo.setError(event.id, error)
-      _ <- outboxRepo.incrementRetryCount(event.id, error)
-      shouldDLQ = event.retryCount >= 2
       _ <-
         if (shouldDLQ) {
+          // Don't increment retry count when moving to DLQ
+          // moveToDLQ will set status to PROCESSED
+          log.warn(s"Event ${event.id} exceeded retries ($maxRetries), moving to DLQ")
           outboxRepo.moveToDLQ(event, "MAX_RETRIES_EXCEEDED", error)
         } else {
-          DBIO.successful(0L)
+          // Increment retry count and set status back to PENDING for retry
+          outboxRepo.incrementRetryCount(event.id, error).map(_ => 0L)
         }
-    } yield {
-      if (shouldDLQ) {
-        log.warn(s"Event ${event.id} exceeded retries, moving to DLQ")
-      }
-      false
-    }
+    } yield false
 
     db.run(action)
   }
@@ -177,5 +366,25 @@ class OutboxProcessor(
     } yield false
 
     db.run(action)
+  }
+
+  private def performStaleCleanup(): Unit = {
+    val cleanupFuture = for {
+      staleCount <- db.run(outboxRepo.countStaleProcessingEvents(staleTimeoutMinutes))
+      resetCount <-
+        if (staleCount > 0) {
+          logger.warn(
+            s"Found $staleCount stale PROCESSING events (timeout: $staleTimeoutMinutes minutes), resetting to PENDING"
+          )
+          db.run(outboxRepo.resetStaleProcessingEvents(staleTimeoutMinutes))
+        } else {
+          Future.successful(0)
+        }
+    } yield resetCount
+
+    context.pipeToSelf(cleanupFuture) {
+      case Success(count) => CleanupComplete(count)
+      case Failure(ex) => CleanupFailed(ex)
+    }
   }
 }

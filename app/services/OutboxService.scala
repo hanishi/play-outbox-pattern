@@ -1,9 +1,9 @@
 package services
 
-import actors.{OutboxProcessor, OutboxProcessorRouter}
-import actors.OutboxProcessor.{ProcessEvent, ProcessUnhandledEvent}
+import actors.OutboxProcessor.ProcessUnhandledEvent
+import actors.{ OutboxProcessor, OutboxProcessorRouter }
 import org.apache.pekko.actor.typed.scaladsl.AskPattern.*
-import org.apache.pekko.actor.typed.{ActorRef, ActorSystem}
+import org.apache.pekko.actor.typed.{ ActorRef, ActorSystem }
 import org.apache.pekko.util.Timeout
 import play.api.*
 import play.api.inject.ApplicationLifecycle
@@ -13,8 +13,7 @@ import slick.jdbc.JdbcBackend.Database
 
 import javax.inject.*
 import scala.concurrent.duration.*
-import scala.concurrent.{ExecutionContext, Future}
-import scala.util.{Failure, Success}
+import scala.concurrent.{ ExecutionContext, Future }
 
 @Singleton
 class OutboxService @Inject() (
@@ -35,6 +34,21 @@ class OutboxService @Inject() (
   private val poolSize =
     config.getOptional[Int]("outbox.poolSize").getOrElse(1)
 
+  private val maxRetries =
+    config.getOptional[Int]("outbox.maxRetries").getOrElse(2)
+
+  private val useListenNotify =
+    config.getOptional[Boolean]("outbox.useListenNotify").getOrElse(true)
+
+  private val staleCleanupEnabled =
+    config.getOptional[Boolean]("outbox.enableStaleEventCleanup").getOrElse(true)
+
+  private val staleTimeoutMinutes =
+    config.getOptional[Int]("outbox.staleEventTimeoutMinutes").getOrElse(5)
+
+  private val cleanupInterval =
+    config.getOptional[FiniteDuration]("outbox.cleanupInterval").getOrElse(1.minute)
+
   private val outboxActor: ActorRef[OutboxProcessor.Command] =
     if (poolSize > 1) {
       logger.info(s"Starting outbox processor with pool router (size: $poolSize)")
@@ -45,21 +59,41 @@ class OutboxService @Inject() (
           outboxRepo,
           pollInterval,
           batchSize,
-          poolSize
+          poolSize,
+          maxRetries,
+          useListenNotify
         ),
         "outbox-processor-pool"
       )
     } else {
       logger.info("Starting single outbox processor")
       system.systemActorOf(
-        OutboxProcessor(db, publisher, outboxRepo, pollInterval, batchSize),
+        OutboxProcessor(
+          db,
+          publisher,
+          outboxRepo,
+          pollInterval,
+          batchSize,
+          maxRetries,
+          useListenNotify,
+          staleCleanupEnabled,
+          staleTimeoutMinutes,
+          cleanupInterval
+        ),
         "outbox-processor"
       )
     }
-  logger.info(s"Outbox processor started (poll: $pollInterval, batch: $batchSize)")
 
-  def processEvent(id: Long): Future[Long] =
-    outboxActor.ask(ref => ProcessEvent(id, ref))
+  // Log the configuration mode
+  if (useListenNotify) {
+    logger.info(
+      s"Outbox processor started with LISTEN/NOTIFY (poll: $pollInterval fallback, batch: $batchSize)"
+    )
+  } else {
+    logger.info(
+      s"Outbox processor started with polling only (poll: $pollInterval, batch: $batchSize)"
+    )
+  }
 
   outboxActor ! ProcessUnhandledEvent
 

@@ -1,6 +1,6 @@
 package repositories
 import com.google.inject.{ Inject, Singleton }
-import models.OutboxEvent
+import models.{ EventStatus, OutboxEvent }
 import slick.jdbc.GetResult
 import slick.jdbc.PostgresProfile.api.*
 
@@ -13,10 +13,12 @@ class OutboxTable(tag: Tag) extends Table[OutboxEvent](tag, "outbox_events") {
     eventType,
     payload,
     createdAt,
+    status,
     processedAt,
     retryCount,
     lastError,
-    movedToDlq
+    movedToDlq,
+    idempotencyKey
   ).mapTo[OutboxEvent]
 
   def id = column[Long]("id", O.PrimaryKey, O.AutoInc)
@@ -29,6 +31,8 @@ class OutboxTable(tag: Tag) extends Table[OutboxEvent](tag, "outbox_events") {
 
   def createdAt = column[Instant]("created_at")
 
+  def status = column[EventStatus]("status")
+
   def processedAt = column[Option[Instant]]("processed_at")
 
   def retryCount = column[Int]("retry_count")
@@ -36,88 +40,110 @@ class OutboxTable(tag: Tag) extends Table[OutboxEvent](tag, "outbox_events") {
   def lastError = column[Option[String]]("last_error")
 
   def movedToDlq = column[Boolean]("moved_to_dlq")
+
+  def idempotencyKey = column[String]("idempotency_key")
+
+  // Column type mapper for EventStatus
+  given BaseColumnType[EventStatus] =
+    MappedColumnType.base[EventStatus, String](
+      status => status.value,
+      str => EventStatus.fromString(str)
+    )
 }
 
 @Singleton
-class OutboxRepository @Inject() (dlqRepo: DeadLetterRepository)(using ec: ExecutionContext) {
+class OutboxRepository @Inject() (
+    dlqRepo: DeadLetterRepository,
+    config: play.api.Configuration
+)(using ec: ExecutionContext) {
   val outbox = TableQuery[OutboxTable]
+
+  private val maxRetries = config.getOptional[Int]("outbox.maxRetries").getOrElse(2)
 
   def insert(event: OutboxEvent): DBIO[Long] = outbox returning outbox.map(_.id) += event
 
-  /** Finds unprocessed events with row-level locking.
+  /** Finds and claims pending events for processing.
     *
-    * TRANSACTION BOUNDARY & LOCKING BEHAVIOR:
-    * ========================================
-    * FOR UPDATE SKIP LOCKED provides row locking ONLY within the transaction.
-    * Once this query completes, the transaction closes and locks are released.
+    * This method uses a status-based approach to prevent race conditions:
+    * 1. SELECT events with status='PENDING' and retry_count < maxRetries
+    * 2. Immediately UPDATE their status to 'PROCESSING' within the same transaction
+    * 3. Return the claimed events for processing
     *
-    * RACE CONDITION SCENARIO:
-    * ========================
-    * 1. Processor A: Fetches event ID=123 at T0 (locks acquired, then immediately released)
-    * 2. Processor A: Publishing to external API (slow, takes 30 seconds)
-    * 3. Processor B: Polls at T0+5s, sees event ID=123 still has processed_at=NULL
-    * 4. Processor B: Can fetch the SAME event ID=123 again!
-    * 5. Both processors now publish the same event
-    *
-    * WHY THIS HAPPENS:
-    * =================
-    * - Event stays in "unprocessed" state (processed_at=NULL) until markProcessed completes
-    * - If processing takes longer than the poll interval, another processor can grab it
-    * - This is especially likely if: external API is slow, poll interval is short, or failures occur
+    * This prevents the race condition where multiple processors could grab the same event
+    * because once an event is marked as PROCESSING, subsequent polls will skip it.
     *
     * DELIVERY SEMANTICS:
     * ===================
-    * This implementation provides **at-least-once** delivery:
-    * - Events are guaranteed to be processed AT LEAST once
-    * - Events MAY be processed MORE THAN once (rare, but possible)
-    * - Your EventPublisher MUST be idempotent to handle duplicates
-    *
-    * CURRENT APPROACH RATIONALE:
-    * ===========================
-    * At-least-once delivery is standard for outbox patterns because:
-    * - Simpler implementation (no extra status column or claim logic)
-    * - External systems should be idempotent anyway (best practice)
-    * - Race condition is rare in practice if processing is reasonably fast
+    * - At-least-once delivery guarantee (events processed at least once)
+    * - No duplicate processing under normal conditions
+    * - Stale PROCESSING events (e.g., from crashed workers) can be recovered
+    *   by a separate cleanup job that resets status to PENDING after a timeout
     */
   def find(id: Long): DBIO[OutboxEvent] =
     sql"""
-      SELECT id, aggregate_id, event_type, payload, created_at, processed_at, retry_count, last_error, moved_to_dlq
+      SELECT id, aggregate_id, event_type, payload, created_at, status, processed_at, retry_count, last_error, moved_to_dlq, idempotency_key
       FROM outbox_events
       WHERE id = $id
     """.as[OutboxEvent].head
 
-  def findUnprocessed(limit: Int = 100): DBIO[Seq[OutboxEvent]] =
+  /** Atomically claims and returns pending events for processing.
+    *
+    * Uses a CTE (Common Table Expression) to:
+    * 1. Select pending events with FOR UPDATE SKIP LOCKED
+    * 2. Update their status to PROCESSING
+    * 3. Return the claimed events
+    *
+    * This happens atomically in a single database round-trip.
+    */
+  def findAndClaimUnprocessed(limit: Int = 100): DBIO[Seq[OutboxEvent]] =
     sql"""
-      SELECT id, aggregate_id, event_type, payload, created_at, processed_at, retry_count, last_error, moved_to_dlq
-      FROM outbox_events
-      WHERE processed_at IS NULL AND retry_count < 3
-      ORDER BY created_at
-      LIMIT $limit
-      FOR UPDATE SKIP LOCKED
+      WITH claimed AS (
+        SELECT id
+        FROM outbox_events
+        WHERE status = 'PENDING'
+          AND retry_count < $maxRetries
+        ORDER BY created_at
+        LIMIT $limit
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE outbox_events e
+      SET status = 'PROCESSING'
+      FROM claimed
+      WHERE e.id = claimed.id
+      RETURNING e.id, e.aggregate_id, e.event_type, e.payload, e.created_at, e.status, e.processed_at, e.retry_count, e.last_error, e.moved_to_dlq, e.idempotency_key
     """.as[OutboxEvent]
-  
 
+  /** Marks an event as successfully processed. */
   def markProcessed(id: Long): DBIO[Int] =
-    outbox
-      .filter(_.id === id)
-      .map(_.processedAt)
-      .update(Some(Instant.now()))
+    sqlu"""
+      UPDATE outbox_events
+      SET status = 'PROCESSED',
+          processed_at = NOW()
+      WHERE id = $id
+    """
 
+  /** Increments retry count and sets status back to PENDING for retry. */
   def incrementRetryCount(id: Long, error: String): DBIO[Int] =
     sqlu"""
       UPDATE outbox_events
       SET retry_count = retry_count + 1,
-          last_error = ${error.take(500)}
+          last_error = ${error.take(500)},
+          status = 'PENDING'
       WHERE id = $id
     """
 
+  /** Moves an event to the dead letter queue. */
   def moveToDLQ(event: OutboxEvent, reason: String, error: String): DBIO[Long] =
     for {
       dlqId <- dlqRepo.insertFromOutboxEvent(event, reason, error)
-      _ <- outbox
-        .filter(_.id === event.id)
-        .map(e => (e.processedAt, e.lastError, e.movedToDlq))
-        .update((Some(Instant.now()), Some(error.take(500)), true))
+      _ <- sqlu"""
+        UPDATE outbox_events
+        SET status = 'PROCESSED',
+            processed_at = NOW(),
+            last_error = ${error.take(500)},
+            moved_to_dlq = TRUE
+        WHERE id = ${event.id}
+      """
     } yield dlqId
 
   def setError(id: Long, error: String): DBIO[Int] =
@@ -135,17 +161,55 @@ class OutboxRepository @Inject() (dlqRepo: DeadLetterRepository)(using ec: Execu
   def countSuccessfullyProcessed: DBIO[Int] =
     outbox.filter(e => e.processedAt.isDefined && !e.movedToDlq).length.result
 
+  /** Resets stale PROCESSING events back to PENDING.
+    *
+    * Events can get stuck in PROCESSING status if:
+    * - Worker crashes while processing
+    * - Network partition prevents completion
+    * - External API hangs indefinitely
+    *
+    * This method finds events that have been PROCESSING for longer than the timeout
+    * and resets them to PENDING so they can be retried.
+    *
+    * @param timeoutMinutes How long an event can be PROCESSING before being considered stale
+    * @return Number of events reset
+    */
+  def resetStaleProcessingEvents(timeoutMinutes: Int = 5): DBIO[Int] = {
+    val timeoutSeconds = timeoutMinutes * 60
+    sqlu"""
+      UPDATE outbox_events
+      SET status = 'PENDING'
+      WHERE status = 'PROCESSING'
+        AND created_at < NOW() - ($timeoutSeconds || ' seconds')::INTERVAL
+        AND retry_count < $maxRetries
+    """
+  }
+
+  /** Counts how many events are currently stuck in PROCESSING state. */
+  def countStaleProcessingEvents(timeoutMinutes: Int = 5): DBIO[Int] = {
+    val timeoutSeconds = timeoutMinutes * 60
+    sql"""
+      SELECT COUNT(*)
+      FROM outbox_events
+      WHERE status = 'PROCESSING'
+        AND created_at < NOW() - ($timeoutSeconds || ' seconds')::INTERVAL
+        AND retry_count < $maxRetries
+    """.as[Int].head
+  }
+
   private given GetResult[OutboxEvent] = GetResult { r =>
     OutboxEvent(
-      id          = r.nextLong(),
-      aggregateId = r.nextString(),
-      eventType   = r.nextString(),
-      payload     = r.nextString(),
-      createdAt   = r.nextTimestamp().toInstant,
-      processedAt = r.nextTimestampOption().map(_.toInstant),
-      retryCount  = r.nextInt(),
-      lastError   = r.nextStringOption(),
-      movedToDlq  = r.nextBoolean()
+      id             = r.nextLong(),
+      aggregateId    = r.nextString(),
+      eventType      = r.nextString(),
+      payload        = r.nextString(),
+      createdAt      = r.nextTimestamp().toInstant,
+      status         = EventStatus.fromString(r.nextString()),
+      processedAt    = r.nextTimestampOption().map(_.toInstant),
+      retryCount     = r.nextInt(),
+      lastError      = r.nextStringOption(),
+      movedToDlq     = r.nextBoolean(),
+      idempotencyKey = r.nextString()
     )
   }
 }

@@ -7,7 +7,7 @@ import javax.inject.*
 import scala.concurrent.duration.*
 
 @Singleton
-class ConfigurationEventRouter @Inject()(
+class ConfigurationEventRouter @Inject() (
     config: Configuration
 ) extends EventRouter {
 
