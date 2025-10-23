@@ -59,11 +59,11 @@ for i in $(seq 1 $COUNT); do
     ((FAILURE_COUNT++))
     echo -ne "\r[$i/$COUNT] Success: $SUCCESS_COUNT | Failed: $FAILURE_COUNT"
     # Uncomment to see error details
-    # echo -e "\nFailed request: HTTP $HTTP_CODE - Customer: $CUSTOMER_ID, Amount: $AMOUNT"
+     echo -e "\nFailed request: HTTP $HTTP_CODE - Customer: $CUSTOMER_ID, Amount: $AMOUNT"
   fi
 
   # Optional: Add a small delay to avoid overwhelming the server
-  # sleep 0.01
+   sleep 0.01
 done
 
 END_TIME=$(date +%s)

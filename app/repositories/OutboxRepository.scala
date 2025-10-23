@@ -128,8 +128,11 @@ class OutboxRepository @Inject() (
       UPDATE outbox_events
       SET retry_count = retry_count + 1,
           last_error = ${error.take(500)},
-          status = 'PENDING'
+          status = 'PENDING',
+          processed_at = NULL
       WHERE id = $id
+        AND status IN ('PROCESSING', 'PENDING')
+        AND processed_at IS NULL
     """
 
   /** Moves an event to the dead letter queue. */

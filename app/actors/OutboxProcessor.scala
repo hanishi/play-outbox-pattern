@@ -11,6 +11,7 @@ import org.postgresql.PGConnection
 import play.api.Logger
 import publishers.{ EventPublisher, PublishResult }
 import repositories.OutboxRepository
+import slick.dbio.DBIO
 import slick.jdbc.JdbcBackend.Database
 
 import java.sql.Connection
@@ -162,6 +163,10 @@ object OutboxProcessor {
       if (success) copy(processed = processed + 1) else copy(failed = failed + 1)
   }
 
+  object Stats {
+    def apply(fetched: Int): Stats = Stats(0, 0, fetched)
+  }
+
   final case class Stop(replyTo: ActorRef[Stopped.type]) extends Command
 
   private final case class ProcessingComplete(stats: Stats) extends Command
@@ -171,10 +176,6 @@ object OutboxProcessor {
   private final case class CleanupComplete(count: Int) extends Command
 
   private final case class CleanupFailed(ex: Throwable) extends Command
-
-  object Stats {
-    def apply(fetched: Int): Stats = Stats(0, 0, fetched)
-  }
 
   case object Stopped
 
@@ -267,7 +268,7 @@ class OutboxProcessor(
 
       // If we fetched a full batch, there might be more events waiting
       // Schedule immediate reprocessing to drain the queue completely
-      if (stats.fetched >= batchSize) {
+      if (stats.fetched >= batchSize) { // Can only be equal, never greater but we
         context.log.info(
           s"Full batch fetched (${stats.fetched}/${batchSize}), draining queue immediately"
         )
@@ -278,9 +279,7 @@ class OutboxProcessor(
         scheduleNext()
       } else {
         // LISTEN/NOTIFY mode and queue is drained - wait for notifications
-        context.log.debug(
-          s"Queue drained (${stats.fetched}/${batchSize}), waiting for notifications"
-        )
+        context.log.debug(s"Queue drained (${stats.fetched}/${batchSize}), waiting for notifications")
       }
 
       stash.unstashAll(idle)
@@ -302,21 +301,19 @@ class OutboxProcessor(
 
   private def processOutboxBatch(): Future[Stats] = {
     logger.info(s"Fetching up to $batchSize unprocessed events")
-    db.run(outboxRepo.findAndClaimUnprocessed(batchSize))
-      .flatMap { events =>
-        val fetchedCount = events.length
-        logger.info(s"Fetched $fetchedCount events from database")
-        if (fetchedCount > 0) {
-          logger.info(s"Event IDs: ${events.map(_.id).mkString(", ")}")
-        }
-        Future.traverse(events)(processEvent).map { results =>
-          results.foldLeft(Stats(fetchedCount))(_ + _)
-        }
+    db.run(outboxRepo.findAndClaimUnprocessed(batchSize)).flatMap { events =>
+      val fetchedCount = events.length
+      logger.info(s"Fetched $fetchedCount events from database")
+      if (fetchedCount > 0) {
+        logger.info(s"Event IDs: ${events.map(_.id).mkString(", ")}")
       }
-      .recoverWith { case ex =>
-        logger.error("Error fetching events", ex)
-        Future.failed(ex)
+      Future.traverse(events)(processEvent).map { results =>
+        results.foldLeft(Stats(fetchedCount))(_ + _)
       }
+    }.recoverWith { case ex =>
+      logger.error("Error fetching events", ex)
+      Future.failed(ex)
+    }
   }
 
   private def processEvent(event: OutboxEvent): Future[Boolean] = publisher
