@@ -61,7 +61,10 @@ class OutboxService @Inject() (
           batchSize,
           poolSize,
           maxRetries,
-          useListenNotify
+          useListenNotify,
+          staleCleanupEnabled,
+          staleTimeoutMinutes,
+          cleanupInterval
         ),
         "outbox-processor-pool"
       )
@@ -84,10 +87,9 @@ class OutboxService @Inject() (
       )
     }
 
-  // Log the configuration mode
   if (useListenNotify) {
     logger.info(
-      s"Outbox processor started with LISTEN/NOTIFY (poll: $pollInterval fallback, batch: $batchSize)"
+      s"Outbox processor started with LISTEN/NOTIFY (instant new events + immediate reprocessing on failures, batch: $batchSize)"
     )
   } else {
     logger.info(

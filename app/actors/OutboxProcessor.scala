@@ -11,7 +11,6 @@ import org.postgresql.PGConnection
 import play.api.Logger
 import publishers.{ EventPublisher, PublishResult }
 import repositories.OutboxRepository
-import slick.dbio.DBIO
 import slick.jdbc.JdbcBackend.Database
 
 import java.sql.Connection
@@ -119,16 +118,15 @@ object OutboxProcessor {
 
         logger.info("Started PostgreSQL LISTEN/NOTIFY stream")
         Some(killSwitch)
-      } else {
-        None
-      }
+      } else None
 
     Behaviors.withTimers { timers =>
       Behaviors.withStash(Int.MaxValue) { stash =>
-        // Only start polling timer if LISTEN/NOTIFY is disabled
-        if (!useListenNotify) {
-          timers.startSingleTimer(ProcessUnhandledEvent, 1.second)
-        }
+        // Start initial processing
+        timers.startSingleTimer(ProcessUnhandledEvent, 1.second)
+
+        // With LISTEN/NOTIFY, notifications trigger immediate processing
+        // Failed events also trigger immediate reprocessing (100ms)
 
         // Start stale event cleanup timer if enabled
         if (staleCleanupEnabled) {
@@ -163,10 +161,6 @@ object OutboxProcessor {
       if (success) copy(processed = processed + 1) else copy(failed = failed + 1)
   }
 
-  object Stats {
-    def apply(fetched: Int): Stats = Stats(0, 0, fetched)
-  }
-
   final case class Stop(replyTo: ActorRef[Stopped.type]) extends Command
 
   private final case class ProcessingComplete(stats: Stats) extends Command
@@ -176,6 +170,10 @@ object OutboxProcessor {
   private final case class CleanupComplete(count: Int) extends Command
 
   private final case class CleanupFailed(ex: Throwable) extends Command
+
+  object Stats {
+    def apply(fetched: Int): Stats = Stats(0, 0, fetched)
+  }
 
   case object Stopped
 
@@ -228,11 +226,10 @@ class OutboxProcessor(
 
   private given ExecutionContext = context.executionContext
 
-  private def scheduleNext(): Unit =
-    // Only schedule next poll if LISTEN/NOTIFY is disabled
-    if (!useListenNotify) {
-      timers.startSingleTimer(ProcessUnhandledEvent, pollInterval)
-    }
+  private def scheduleNext(): Unit = {
+    // Only used in polling mode (when useListenNotify is false)
+    timers.startSingleTimer(ProcessUnhandledEvent, pollInterval)
+  }
 
   private def pipeToSelf[T](fut: => Future[T])(onSuccess: T => Command): Unit =
     context.pipeToSelf(fut) {
@@ -242,7 +239,7 @@ class OutboxProcessor(
 
   private def idle: Behavior[Command] = Behaviors.receiveMessage {
     case ProcessUnhandledEvent =>
-      context.log.debug("Received ProcessUnhandledEvent in IDLE state")
+      context.log.debug("Received ProcessUnhandledEvent")
       context.log.debug("Processing unhandled outbox events")
       pipeToSelf(processOutboxBatch())(stats => ProcessingComplete(stats))
       stash.unstashAll(processing)
@@ -266,20 +263,22 @@ class OutboxProcessor(
         )
       }
 
-      // If we fetched a full batch, there might be more events waiting
-      // Schedule immediate reprocessing to drain the queue completely
-      if (stats.fetched >= batchSize) { // Can only be equal, never greater but we
+      // If we fetched a full batch or had failures in LISTEN/NOTIFY mode,
+      // schedule immediate reprocessing to drain the queue
+      if (stats.fetched >= batchSize || (stats.failed > 0 && useListenNotify)) {
         context.log.info(
-          s"Full batch fetched (${stats.fetched}/${batchSize}), draining queue immediately"
+          s"Batch: ${stats.fetched}/${batchSize}, Failed: ${stats.failed}, scheduling immediate reprocessing"
         )
         timers.startSingleTimer(ProcessUnhandledEvent, 100.millis)
       } else if (!useListenNotify) {
-        // Only schedule polling if LISTEN/NOTIFY is disabled and queue is drained
+        // Polling mode - always schedule next poll
         context.log.debug(s"Queue drained (${stats.fetched}/${batchSize}), scheduling next poll")
         scheduleNext()
       } else {
-        // LISTEN/NOTIFY mode and queue is drained - wait for notifications
-        context.log.debug(s"Queue drained (${stats.fetched}/${batchSize}), waiting for notifications")
+        // LISTEN/NOTIFY mode with no failures - wait for notifications
+        context.log.debug(
+          s"Queue drained (${stats.fetched}/${batchSize}), waiting for notifications"
+        )
       }
 
       stash.unstashAll(idle)
@@ -301,22 +300,24 @@ class OutboxProcessor(
 
   private def processOutboxBatch(): Future[Stats] = {
     logger.info(s"Fetching up to $batchSize unprocessed events")
-    db.run(outboxRepo.findAndClaimUnprocessed(batchSize)).flatMap { events =>
-      val fetchedCount = events.length
-      logger.info(s"Fetched $fetchedCount events from database")
-      if (fetchedCount > 0) {
-        logger.info(s"Event IDs: ${events.map(_.id).mkString(", ")}")
+    db.run(outboxRepo.findAndClaimUnprocessed(batchSize))
+      .flatMap { events =>
+        val fetchedCount = events.length
+        logger.info(s"Fetched $fetchedCount events from database")
+        if (fetchedCount > 0) {
+          logger.info(s"Event IDs: ${events.map(_.id).mkString(", ")}")
+        }
+        Future.traverse(events)(publishEvent).map { results =>
+          results.foldLeft(Stats(fetchedCount))(_ + _)
+        }
       }
-      Future.traverse(events)(processEvent).map { results =>
-        results.foldLeft(Stats(fetchedCount))(_ + _)
+      .recoverWith { case ex =>
+        logger.error("Error fetching events", ex)
+        Future.failed(ex)
       }
-    }.recoverWith { case ex =>
-      logger.error("Error fetching events", ex)
-      Future.failed(ex)
-    }
   }
 
-  private def processEvent(event: OutboxEvent): Future[Boolean] = publisher
+  private def publishEvent(event: OutboxEvent): Future[Boolean] = publisher
     .publish(event)
     .flatMap {
       case PublishResult.Success =>

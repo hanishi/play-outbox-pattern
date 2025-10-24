@@ -14,11 +14,14 @@ object OutboxProcessorRouter {
       db: Database,
       publisher: EventPublisher,
       outboxRepo: OutboxRepository,
-      pollInterval: FiniteDuration = 5.seconds,
-      batchSize: Int               = 100,
-      poolSize: Int                = Runtime.getRuntime.availableProcessors(),
-      maxRetries: Int              = 2,
-      useListenNotify: Boolean     = false
+      pollInterval: FiniteDuration    = 5.seconds,
+      batchSize: Int                  = 100,
+      poolSize: Int                   = Runtime.getRuntime.availableProcessors(),
+      maxRetries: Int                 = 2,
+      useListenNotify: Boolean        = false,
+      staleCleanupEnabled: Boolean    = true,
+      staleTimeoutMinutes: Int        = 5,
+      cleanupInterval: FiniteDuration = 1.minute
   ): Behavior[OutboxProcessor.Command] = Behaviors.setup { context =>
 
     context.log.info(s"Starting OutboxProcessor pool with $poolSize workers")
@@ -32,7 +35,10 @@ object OutboxProcessorRouter {
           pollInterval,
           batchSize,
           maxRetries,
-          useListenNotify
+          useListenNotify,
+          staleCleanupEnabled,
+          staleTimeoutMinutes,
+          cleanupInterval
         )
       }
       .withRoundRobinRouting()
