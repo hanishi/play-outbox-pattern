@@ -1,6 +1,8 @@
 # Transactional Outbox Pattern - Play Framework Implementation
 
-A demo implementation of the **Transactional Outbox Pattern** using Scala 3, Play Framework 3.0, and PostgreSQL. This pattern ensures reliable event delivery to external systems by saving events transactionally with business data, then processing them asynchronously.
+A demo implementation of the **Transactional Outbox Pattern** using Scala 3, Play Framework 3.0, and PostgreSQL. This
+pattern ensures reliable event delivery to external systems by saving events transactionally with business data, then
+processing them asynchronously.
 
 ## Why the Outbox Pattern?
 
@@ -25,6 +27,7 @@ When building distributed systems, you often need to:
 ## Features
 
 ### Core Pattern
+
 - **Transactional Consistency**: Events and business data saved atomically
 - **At-Least-Once Delivery**: Automatic retries with configurable limits
 - **Dead Letter Queue**: Failed events captured with full error context
@@ -32,12 +35,14 @@ When building distributed systems, you often need to:
 - **Stale Event Recovery**: Automatically resets stuck PROCESSING events back to PENDING
 
 ### Performance & Scalability
+
 - **PostgreSQL LISTEN/NOTIFY**: Near-instant event processing (optional, configurable)
 - **Concurrent Processing**: Optional parallel workers using `FOR UPDATE SKIP LOCKED`
 - **Efficient Polling**: Optimized indexes for fast event queries
 - **Connection Pooling**: Proper database connection management
 
 ### Developer Experience
+
 - **Demo UI**: Interactive web interface to test the pattern
 - **Webhook Simulator**: Built-in HTTP server to simulate success/failure scenarios
 - **Comprehensive Logging**: Play Framework logger for debugging
@@ -99,15 +104,11 @@ When building distributed systems, you often need to:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/play-outbox-pattern.git
+git clone https://github.com/hanishi/play-outbox-pattern.git
 cd play-outbox-pattern
 
 # Start PostgreSQL
 docker-compose up -d postgres
-
-# Create database and schema
-psql -U postgres -h localhost -c "CREATE DATABASE outbox_demo;"
-psql -U postgres -h localhost -d outbox_demo -f sql/schema.sql
 
 # Run the application
 sbt run
@@ -225,7 +226,7 @@ To reprocess a DLQ event:
 INSERT INTO outbox_events (aggregate_id, event_type, payload, created_at, retry_count)
 SELECT aggregate_id, event_type, payload, NOW(), 0
 FROM dead_letter_events
-WHERE id = <dlq_event_id>;
+WHERE id = < dlq_event_id >;
 ```
 
 ## PostgreSQL LISTEN/NOTIFY Integration
@@ -352,42 +353,45 @@ Key tables in the schema:
 
 ```sql
 -- Business data
-CREATE TABLE orders (
+CREATE TABLE orders
+(
     id           BIGSERIAL PRIMARY KEY,
-    customer_id  VARCHAR(255) NOT NULL,
+    customer_id  VARCHAR(255)   NOT NULL,
     total_amount DECIMAL(10, 2) NOT NULL,
-    order_status VARCHAR(50) NOT NULL DEFAULT 'PENDING',  -- Order fulfillment state
-    created_at   TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at   TIMESTAMP NOT NULL DEFAULT NOW(),
-    deleted      BOOLEAN NOT NULL DEFAULT FALSE
+    order_status VARCHAR(50)    NOT NULL DEFAULT 'PENDING', -- Order fulfillment state
+    created_at   TIMESTAMP      NOT NULL DEFAULT NOW(),
+    updated_at   TIMESTAMP      NOT NULL DEFAULT NOW(),
+    deleted      BOOLEAN        NOT NULL DEFAULT FALSE
 );
 
 -- Outbox pattern table
-CREATE TABLE outbox_events (
+CREATE TABLE outbox_events
+(
     id              BIGSERIAL PRIMARY KEY,
     aggregate_id    VARCHAR(255) NOT NULL,
     event_type      VARCHAR(255) NOT NULL,
-    payload         TEXT NOT NULL,
-    created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-    status          VARCHAR(20) NOT NULL DEFAULT 'PENDING',  -- Event processing state
+    payload         TEXT         NOT NULL,
+    created_at      TIMESTAMP    NOT NULL DEFAULT NOW(),
+    status          VARCHAR(20)  NOT NULL DEFAULT 'PENDING', -- Event processing state
     processed_at    TIMESTAMP,
-    retry_count     INT NOT NULL DEFAULT 0,
+    retry_count     INT          NOT NULL DEFAULT 0,
     last_error      TEXT,
-    moved_to_dlq    BOOLEAN NOT NULL DEFAULT FALSE,
+    moved_to_dlq    BOOLEAN      NOT NULL DEFAULT FALSE,
     idempotency_key VARCHAR(512) NOT NULL
 );
 
 -- Dead letter queue
-CREATE TABLE dead_letter_events (
+CREATE TABLE dead_letter_events
+(
     id                BIGSERIAL PRIMARY KEY,
-    original_event_id BIGINT NOT NULL,
-    aggregate_id      VARCHAR(255) NOT NULL,
-    event_type        VARCHAR(255) NOT NULL,
-    payload           TEXT NOT NULL,
-    created_at        TIMESTAMP NOT NULL,
-    failed_at         TIMESTAMP NOT NULL DEFAULT NOW(),
-    retry_count       INT NOT NULL,
-    last_error        TEXT NOT NULL,
+    original_event_id BIGINT        NOT NULL,
+    aggregate_id      VARCHAR(255)  NOT NULL,
+    event_type        VARCHAR(255)  NOT NULL,
+    payload           TEXT          NOT NULL,
+    created_at        TIMESTAMP     NOT NULL,
+    failed_at         TIMESTAMP     NOT NULL DEFAULT NOW(),
+    retry_count       INT           NOT NULL,
+    last_error        TEXT          NOT NULL,
     reason            VARCHAR(1024) NOT NULL
 );
 ```
@@ -421,11 +425,13 @@ blocking-jdbc {
 ### LISTEN/NOTIFY vs Polling
 
 **Use LISTEN/NOTIFY when:**
+
 - You need low latency (< 1 second)
 - You have moderate throughput (< 1000 events/sec)
 - You can afford dedicated connections
 
 **Use Polling when:**
+
 - You need massive parallelism (100+ workers)
 - Your database doesn't support LISTEN/NOTIFY
 - Connection overhead is a concern
@@ -443,20 +449,18 @@ Query for monitoring:
 
 ```sql
 -- Current outbox health
-SELECT
-  status,
-  COUNT(*) as count,
-  AVG(retry_count) as avg_retries,
-  MAX(created_at) as latest_event
+SELECT status,
+       COUNT(*)         as count,
+       AVG(retry_count) as avg_retries,
+       MAX(created_at)  as latest_event
 FROM outbox_events
 WHERE status != 'PROCESSED'
 GROUP BY status;
 
 -- DLQ trends
-SELECT
-  DATE(failed_at) as date,
-  reason,
-  COUNT(*) as count
+SELECT DATE(failed_at) as date,
+       reason,
+       COUNT(*)        as count
 FROM dead_letter_events
 GROUP BY DATE(failed_at), reason
 ORDER BY date DESC;

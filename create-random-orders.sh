@@ -5,7 +5,7 @@
 
 BASE_URL="${1:-http://localhost:9000}"
 COUNT="${2:-1000}"
-ENDPOINT="$BASE_URL/orders/create"
+ENDPOINT="$BASE_URL/orders"
 
 # Array of sample customer IDs
 CUSTOMER_IDS=(

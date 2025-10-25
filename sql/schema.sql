@@ -19,11 +19,11 @@ CREATE TABLE outbox_events
     payload         TEXT         NOT NULL,
     created_at      TIMESTAMP    NOT NULL DEFAULT NOW(),
     status          VARCHAR(20)  NOT NULL DEFAULT 'PENDING', -- PENDING, PROCESSING, PROCESSED, FAILED
-    processed_at    TIMESTAMP,                          -- Set when event is successfully published or moved to DLQ
-    retry_count     INT          NOT NULL DEFAULT 0,    -- Number of retry attempts
-    last_error      TEXT,                               -- Last error encountered (preserved even after success for debugging)
-    moved_to_dlq    BOOLEAN      NOT NULL DEFAULT FALSE, -- TRUE if event was moved to dead_letter_events table
-    idempotency_key VARCHAR(512) NOT NULL              -- Unique key to prevent duplicate events: {aggregate_id}:{event_type}
+    processed_at    TIMESTAMP,                               -- Set when event is successfully published or moved to DLQ
+    retry_count     INT          NOT NULL DEFAULT 0,         -- Number of retry attempts
+    last_error      TEXT,                                    -- Last error encountered (preserved even after success for debugging)
+    moved_to_dlq    BOOLEAN      NOT NULL DEFAULT FALSE,     -- TRUE if event was moved to dead_letter_events table
+    idempotency_key VARCHAR(512) NOT NULL                    -- Unique key to prevent duplicate events: {aggregate_id}:{event_type}
 );
 
 -- Indexes for outbox_events
@@ -61,17 +61,26 @@ CREATE INDEX idx_dlq_failed_at ON dead_letter_events (failed_at DESC);
 CREATE INDEX idx_dlq_original_event ON dead_letter_events (original_event_id);
 
 -- PostgreSQL LISTEN/NOTIFY support for near-instant event processing
--- This trigger notifies the application when new events are inserted
+-- This trigger notifies the application when:
+-- 1. New events are inserted (INSERT)
+-- 2. Events are retried after failure (UPDATE status to PENDING)
+-- This ensures retry events don't get stuck waiting for next poll cycle
 CREATE OR REPLACE FUNCTION notify_new_outbox_event()
-RETURNS trigger AS $$
+    RETURNS trigger AS
+$$
 BEGIN
-  -- Send notification with event ID as payload
-  PERFORM pg_notify('outbox_events_channel', NEW.id::text);
-  RETURN NEW;
+    -- Only notify when status is PENDING and either:
+    -- 1. This is an INSERT, or
+    -- 2. Status changed TO PENDING (wasn't PENDING before)
+    IF NEW.status = 'PENDING' AND (TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM 'PENDING') THEN
+        PERFORM pg_notify('outbox_events_channel', NEW.id::text);
+    END IF;
+    RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER outbox_event_inserted
-AFTER INSERT ON outbox_events
-FOR EACH ROW
+    AFTER INSERT OR UPDATE OF status
+    ON outbox_events
+    FOR EACH ROW
 EXECUTE FUNCTION notify_new_outbox_event();

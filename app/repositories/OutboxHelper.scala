@@ -28,6 +28,13 @@ trait OutboxHelper {
       _ <- saveEvent(event)
     } yield result).transactionally
 
+  protected def saveEvent(event: DomainEvent): DBIO[Long] =
+    (outbox returning outbox.map(_.id)) += OutboxEvent(
+      aggregateId = event.aggregateId,
+      eventType   = event.eventType,
+      payload     = event.toJson.toString
+    ).withIdempotencyKey // Automatically generate idempotency key
+
   /** Variant that allows creating the event based on the action's result.
     *
     * Useful when you need data from the action (like a generated ID) to construct the event.
@@ -43,11 +50,4 @@ trait OutboxHelper {
       result <- action
       _ <- saveEvent(eventFactory(result))
     } yield result).transactionally
-
-  protected def saveEvent(event: DomainEvent): DBIO[Long] =
-    (outbox returning outbox.map(_.id)) += OutboxEvent(
-      aggregateId = event.aggregateId,
-      eventType   = event.eventType,
-      payload     = event.toJson.toString
-    ).withIdempotencyKey // Automatically generate idempotency key
 }

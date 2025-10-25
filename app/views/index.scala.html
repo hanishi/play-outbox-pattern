@@ -277,7 +277,7 @@
                 </div>
                 <div class="card">
                     <h2>Create Order</h2>
-                    <form hx-post="/orders/create" hx-target="#response" hx-swap="innerHTML">
+                    <form hx-post="/orders" hx-target="#response" hx-swap="innerHTML">
                         <input type="hidden" name="@token.name" value="@token.value">
                         <div class="form-group">
                             <label for="customerId">Customer ID</label>
@@ -295,7 +295,7 @@
 
             <div class="card">
                 <h2>Recent Orders</h2>
-                <div id="orders" hx-get="/orders/list" hx-trigger="load, every 3s" hx-swap="innerHTML">
+                <div id="orders" hx-get="/orders" hx-trigger="load, every 3s" hx-swap="innerHTML">
                     <p style="color: #718096;
                         text-align: center;
                         padding: 2rem;">Loading orders...</p>

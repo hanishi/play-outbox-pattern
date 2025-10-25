@@ -1,10 +1,12 @@
 package controllers
 
 import models.Order
+import play.api.libs.json.*
 import play.api.mvc.*
 import repositories.{ DeadLetterRepository, OutboxRepository }
 import services.OrderService
 import slick.jdbc.JdbcBackend.Database
+import slick.jdbc.PostgresProfile.api.*
 
 import java.time.Instant
 import javax.inject.*
@@ -83,17 +85,6 @@ class OrderController @Inject() (
       }
   }
 
-  def deleteOrder(id: Long): Action[AnyContent] = Action.async { request =>
-    orderService
-      .deleteOrder(id)
-      .flatMap { _ =>
-        listOrders.apply(request)
-      }
-      .recover { case ex =>
-        Ok(s"""<div class="error">Error: ${ex.getMessage}</div>""").as("text/html")
-      }
-  }
-
   def listOrders: Action[AnyContent] = Action.async {
     orderService
       .listOrders(10, 0)
@@ -146,19 +137,39 @@ class OrderController @Inject() (
       }
   }
 
+  def deleteOrder(id: Long): Action[AnyContent] = Action.async { request =>
+    orderService
+      .deleteOrder(id)
+      .flatMap { _ =>
+        listOrders.apply(request)
+      }
+      .recover { case ex =>
+        Ok(s"""<div class="error">Error: ${ex.getMessage}</div>""").as("text/html")
+      }
+  }
+
   def outboxStats: Action[AnyContent] = Action.async {
     for {
       pending <- db.run(outboxRepo.countPending)
+      processing <- db.run(
+        sql"SELECT COUNT(*) FROM outbox_events WHERE status = 'PROCESSING'".as[Int].head
+      )
       successful <- db.run(outboxRepo.countSuccessfullyProcessed)
       dlqTotal <- db.run(dlqRepo.countAll)
       dlqMaxRetries <- db.run(dlqRepo.countByReason("MAX_RETRIES_EXCEEDED"))
       dlqNonRetryable <- db.run(dlqRepo.countByReason("NON_RETRYABLE_ERROR"))
     } yield {
-      val html = s"""
+      val totalPendingAndProcessing = pending + processing
+      val html                      = s"""
       <div class="stat-grid">
         <div class="stat">
-          <div class="stat-value">$pending</div>
-          <div class="stat-label">Pending Events</div>
+          <div class="stat-value">$totalPendingAndProcessing</div>
+          <div class="stat-label">Queued Events</div>
+          ${
+          if (processing > 0)
+            s"""<div style="font-size: 0.75rem; color: #4299e1; margin-top: 0.25rem;">Processing: $processing</div>"""
+          else ""
+        }
         </div>
         <div class="stat" style="background: ${
           if (successful > 0) "#F0FDF4" else "white"
@@ -184,6 +195,172 @@ class OrderController @Inject() (
       </div>
       """
       Ok(html).as("text/html")
+    }
+  }
+
+  // JSON API endpoints
+
+  def createOrderJson: Action[JsValue] = Action.async(parse.json) { request =>
+    val customerId  = (request.body \ "customerId").asOpt[String].getOrElse("customer-123")
+    val totalAmount = (request.body \ "totalAmount").asOpt[BigDecimal].getOrElse(BigDecimal(99.99))
+
+    val order = Order(
+      customerId  = customerId,
+      totalAmount = totalAmount,
+      orderStatus = "PENDING",
+      createdAt   = Instant.now(),
+      updatedAt   = Instant.now()
+    )
+
+    orderService
+      .createOrder(order)
+      .map { orderId =>
+        Ok(
+          Json.obj(
+            "success" -> true,
+            "orderId" -> orderId,
+            "message" -> s"Order #$orderId created successfully! Event queued in outbox."
+          )
+        )
+      }
+      .recover { case ex =>
+        InternalServerError(
+          Json.obj(
+            "success" -> false,
+            "error" -> ex.getMessage
+          )
+        )
+      }
+  }
+
+  def updateStatusJson(id: Long): Action[JsValue] = Action.async(parse.json) { request =>
+    val status = (request.body \ "status").asOpt[String].getOrElse("PROCESSING")
+
+    orderService
+      .updateOrderStatus(id, status)
+      .map { _ =>
+        Ok(
+          Json.obj(
+            "success" -> true,
+            "orderId" -> id,
+            "status" -> status,
+            "message" -> s"Order #$id status updated to $status"
+          )
+        )
+      }
+      .recover {
+        case _: NoSuchElementException =>
+          NotFound(
+            Json.obj(
+              "success" -> false,
+              "error" -> s"Order $id not found"
+            )
+          )
+        case ex =>
+          InternalServerError(
+            Json.obj(
+              "success" -> false,
+              "error" -> ex.getMessage
+            )
+          )
+      }
+  }
+
+  def cancelOrderJson(id: Long): Action[AnyContent] = Action.async {
+    orderService
+      .cancelOrder(id, "User requested via API")
+      .map { _ =>
+        Ok(
+          Json.obj(
+            "success" -> true,
+            "orderId" -> id,
+            "message" -> s"Order #$id cancelled successfully"
+          )
+        )
+      }
+      .recover {
+        case _: NoSuchElementException =>
+          NotFound(
+            Json.obj(
+              "success" -> false,
+              "error" -> s"Order $id not found"
+            )
+          )
+        case ex =>
+          InternalServerError(
+            Json.obj(
+              "success" -> false,
+              "error" -> ex.getMessage
+            )
+          )
+      }
+  }
+
+  def deleteOrderJson(id: Long): Action[AnyContent] = Action.async {
+    orderService
+      .deleteOrder(id)
+      .map { _ =>
+        Ok(
+          Json.obj(
+            "success" -> true,
+            "orderId" -> id,
+            "message" -> s"Order #$id deleted successfully"
+          )
+        )
+      }
+      .recover { case ex =>
+        InternalServerError(
+          Json.obj(
+            "success" -> false,
+            "error" -> ex.getMessage
+          )
+        )
+      }
+  }
+
+  def listOrdersJson: Action[AnyContent] = Action.async {
+    orderService
+      .listOrders(10, 0)
+      .map { orders =>
+        Ok(
+          Json.obj(
+            "success" -> true,
+            "orders" -> Json.toJson(orders)
+          )
+        )
+      }
+      .recover { case ex =>
+        InternalServerError(
+          Json.obj(
+            "success" -> false,
+            "error" -> ex.getMessage
+          )
+        )
+      }
+  }
+
+  def outboxStatsJson: Action[AnyContent] = Action.async {
+    for {
+      pending <- db.run(outboxRepo.countPending)
+      successful <- db.run(outboxRepo.countSuccessfullyProcessed)
+      dlqTotal <- db.run(dlqRepo.countAll)
+      dlqMaxRetries <- db.run(dlqRepo.countByReason("MAX_RETRIES_EXCEEDED"))
+      dlqNonRetryable <- db.run(dlqRepo.countByReason("NON_RETRYABLE_ERROR"))
+    } yield {
+      Ok(
+        Json.obj(
+          "success" -> true,
+          "stats" -> Json.obj(
+            "pendingEvents" -> pending,
+            "successfullyPublished" -> successful,
+            "deadLetterQueue" -> Json.obj(
+              "total" -> dlqTotal,
+              "maxRetries" -> dlqMaxRetries,
+              "nonRetryable" -> dlqNonRetryable
+            )
+          )
+        )
+      )
     }
   }
 }

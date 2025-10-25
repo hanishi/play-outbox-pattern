@@ -8,8 +8,9 @@ import javax.inject.*
 @Singleton
 class HomeController @Inject() (cc: ControllerComponents) extends AbstractController(cc) {
 
-  def index: Action[AnyContent] = Action { implicit request =>
-    val token = CSRF.getToken.get
-    Ok(views.html.index()(request, token))
+  def index: Action[AnyContent] = Action { case given Request[AnyContent] =>
+    CSRF.getToken.fold(NotFound("token not found")) { case given CSRF.Token =>
+      Ok(views.html.index())
+    }
   }
 }

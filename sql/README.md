@@ -1,6 +1,7 @@
 ## Dead Letter Events Table
 
 The `dead_letter_events` table stores events that failed processing after:
+
 - **MAX_RETRIES_EXCEEDED**: Event failed 3+ times with retryable errors
 - **NON_RETRYABLE_ERROR**: Event failed with 4xx HTTP status or non-retryable error
 

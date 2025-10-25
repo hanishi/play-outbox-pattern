@@ -6,7 +6,17 @@ import slick.jdbc.PostgresProfile.api.*
 
 import java.time.Instant
 import scala.concurrent.ExecutionContext
+
+object OutboxTable {
+  given eventStatusMapper: BaseColumnType[EventStatus] =
+    MappedColumnType.base[EventStatus, String](
+      status => status.value,
+      str => EventStatus.fromString(str)
+    )
+}
+
 class OutboxTable(tag: Tag) extends Table[OutboxEvent](tag, "outbox_events") {
+  import OutboxTable.given
   def * = (
     id,
     aggregateId,
@@ -42,13 +52,6 @@ class OutboxTable(tag: Tag) extends Table[OutboxEvent](tag, "outbox_events") {
   def movedToDlq = column[Boolean]("moved_to_dlq")
 
   def idempotencyKey = column[String]("idempotency_key")
-
-  // Column type mapper for EventStatus
-  given BaseColumnType[EventStatus] =
-    MappedColumnType.base[EventStatus, String](
-      status => status.value,
-      str => EventStatus.fromString(str)
-    )
 }
 
 @Singleton
@@ -56,6 +59,8 @@ class OutboxRepository @Inject() (
     dlqRepo: DeadLetterRepository,
     config: play.api.Configuration
 )(using ec: ExecutionContext) {
+  import OutboxTable.given
+
   val outbox = TableQuery[OutboxTable]
 
   private val maxRetries = config.getOptional[Int]("outbox.maxRetries").getOrElse(2)
@@ -80,11 +85,7 @@ class OutboxRepository @Inject() (
     *   by a separate cleanup job that resets status to PENDING after a timeout
     */
   def find(id: Long): DBIO[OutboxEvent] =
-    sql"""
-      SELECT id, aggregate_id, event_type, payload, created_at, status, processed_at, retry_count, last_error, moved_to_dlq, idempotency_key
-      FROM outbox_events
-      WHERE id = $id
-    """.as[OutboxEvent].head
+    outbox.filter(_.id === id).result.head
 
   /** Atomically claims and returns pending events for processing.
     *
@@ -95,58 +96,58 @@ class OutboxRepository @Inject() (
     *
     * This happens atomically in a single database round-trip.
     */
-  def findAndClaimUnprocessed(limit: Int = 100): DBIO[Seq[OutboxEvent]] =
+  def findAndClaimUnprocessed(limit: Int = 100): DBIO[Seq[OutboxEvent]] = {
+    val pendingStatus    = EventStatus.Pending.value
+    val processingStatus = EventStatus.Processing.value
     sql"""
       WITH claimed AS (
         SELECT id
         FROM outbox_events
-        WHERE status = 'PENDING'
+        WHERE status = $pendingStatus
           AND retry_count < $maxRetries
         ORDER BY created_at
         LIMIT $limit
         FOR UPDATE SKIP LOCKED
       )
       UPDATE outbox_events e
-      SET status = 'PROCESSING'
+      SET status = $processingStatus
       FROM claimed
       WHERE e.id = claimed.id
       RETURNING e.id, e.aggregate_id, e.event_type, e.payload, e.created_at, e.status, e.processed_at, e.retry_count, e.last_error, e.moved_to_dlq, e.idempotency_key
     """.as[OutboxEvent]
+  }
 
   /** Marks an event as successfully processed. */
   def markProcessed(id: Long): DBIO[Int] =
-    sqlu"""
-      UPDATE outbox_events
-      SET status = 'PROCESSED',
-          processed_at = NOW()
-      WHERE id = $id
-    """
+    outbox
+      .filter(_.id === id)
+      .map(e => (e.status, e.processedAt))
+      .update((EventStatus.Processed, Some(Instant.now())))
 
   /** Increments retry count and sets status back to PENDING for retry. */
-  def incrementRetryCount(id: Long, error: String): DBIO[Int] =
+  def incrementRetryCount(id: Long, error: String): DBIO[Int] = {
+    val pendingStatus    = EventStatus.Pending.value
+    val processingStatus = EventStatus.Processing.value
     sqlu"""
       UPDATE outbox_events
       SET retry_count = retry_count + 1,
           last_error = ${error.take(500)},
-          status = 'PENDING',
+          status = $pendingStatus,
           processed_at = NULL
       WHERE id = $id
-        AND status IN ('PROCESSING', 'PENDING')
+        AND (status = $processingStatus OR status = $pendingStatus)
         AND processed_at IS NULL
     """
+  }
 
   /** Moves an event to the dead letter queue. */
   def moveToDLQ(event: OutboxEvent, reason: String, error: String): DBIO[Long] =
     for {
       dlqId <- dlqRepo.insertFromOutboxEvent(event, reason, error)
-      _ <- sqlu"""
-        UPDATE outbox_events
-        SET status = 'PROCESSED',
-            processed_at = NOW(),
-            last_error = ${error.take(500)},
-            moved_to_dlq = TRUE
-        WHERE id = ${event.id}
-      """
+      _ <- outbox
+        .filter(_.id === event.id)
+        .map(e => (e.status, e.processedAt, e.lastError, e.movedToDlq))
+        .update((EventStatus.Processed, Some(Instant.now()), Some(error.take(500)), true))
     } yield dlqId
 
   def setError(id: Long, error: String): DBIO[Int] =
@@ -156,13 +157,16 @@ class OutboxRepository @Inject() (
       .update(Some(error.take(500)))
 
   def countPending: DBIO[Int] =
-    outbox.filter(_.processedAt.isEmpty).length.result
+    outbox.filter(_.status === (EventStatus.Pending: EventStatus)).length.result
 
   def countProcessed: DBIO[Int] =
-    outbox.filter(_.processedAt.isDefined).length.result
+    outbox.filter(_.status === (EventStatus.Processed: EventStatus)).length.result
 
   def countSuccessfullyProcessed: DBIO[Int] =
-    outbox.filter(e => e.processedAt.isDefined && !e.movedToDlq).length.result
+    outbox
+      .filter(e => e.status === (EventStatus.Processed: EventStatus) && e.movedToDlq === false)
+      .length
+      .result
 
   /** Resets stale PROCESSING events back to PENDING.
     *
@@ -178,11 +182,13 @@ class OutboxRepository @Inject() (
     * @return Number of events reset
     */
   def resetStaleProcessingEvents(timeoutMinutes: Int = 5): DBIO[Int] = {
-    val timeoutSeconds = timeoutMinutes * 60
+    val timeoutSeconds   = timeoutMinutes * 60
+    val pendingStatus    = EventStatus.Pending.value
+    val processingStatus = EventStatus.Processing.value
     sqlu"""
       UPDATE outbox_events
-      SET status = 'PENDING'
-      WHERE status = 'PROCESSING'
+      SET status = $pendingStatus
+      WHERE status = $processingStatus
         AND created_at < NOW() - ($timeoutSeconds || ' seconds')::INTERVAL
         AND retry_count < $maxRetries
     """
@@ -190,11 +196,12 @@ class OutboxRepository @Inject() (
 
   /** Counts how many events are currently stuck in PROCESSING state. */
   def countStaleProcessingEvents(timeoutMinutes: Int = 5): DBIO[Int] = {
-    val timeoutSeconds = timeoutMinutes * 60
+    val timeoutSeconds   = timeoutMinutes * 60
+    val processingStatus = EventStatus.Processing.value
     sql"""
       SELECT COUNT(*)
       FROM outbox_events
-      WHERE status = 'PROCESSING'
+      WHERE status = $processingStatus
         AND created_at < NOW() - ($timeoutSeconds || ' seconds')::INTERVAL
         AND retry_count < $maxRetries
     """.as[Int].head

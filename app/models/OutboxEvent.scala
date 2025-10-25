@@ -11,6 +11,14 @@ enum EventStatus(val value: String):
   case Failed extends EventStatus("FAILED")
 
 object EventStatus {
+  private val eventStatusReads: Reads[EventStatus] = Reads {
+    case JsString(s) => JsSuccess(fromString(s))
+    case _ => JsError("Expected string for EventStatus")
+  }
+  private val eventStatusWrites: Writes[EventStatus] = Writes { status =>
+    JsString(status.value)
+  }
+
   def fromString(s: String): EventStatus = s.toUpperCase match {
     case "PENDING" => Pending
     case "PROCESSING" => Processing
@@ -19,17 +27,7 @@ object EventStatus {
     case _ => Pending // default fallback
   }
 
-  // JSON serialization support
-  implicit val eventStatusReads: Reads[EventStatus] = Reads {
-    case JsString(s) => JsSuccess(fromString(s))
-    case _ => JsError("Expected string for EventStatus")
-  }
-
-  implicit val eventStatusWrites: Writes[EventStatus] = Writes { status =>
-    JsString(status.value)
-  }
-
-  implicit val eventStatusFormat: Format[EventStatus] = Format(eventStatusReads, eventStatusWrites)
+  given Format[EventStatus] = Format(eventStatusReads, eventStatusWrites)
 }
 
 case class OutboxEvent(

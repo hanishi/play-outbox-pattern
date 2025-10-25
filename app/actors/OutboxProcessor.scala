@@ -12,6 +12,7 @@ import play.api.Logger
 import publishers.{ EventPublisher, PublishResult }
 import repositories.OutboxRepository
 import slick.jdbc.JdbcBackend.Database
+import slick.jdbc.PostgresProfile.api.DBIO
 
 import java.sql.Connection
 import scala.concurrent.*
@@ -122,15 +123,12 @@ object OutboxProcessor {
 
     Behaviors.withTimers { timers =>
       Behaviors.withStash(Int.MaxValue) { stash =>
-        // Start initial processing
+
         timers.startSingleTimer(ProcessUnhandledEvent, 1.second)
 
-        // With LISTEN/NOTIFY, notifications trigger immediate processing
-        // Failed events also trigger immediate reprocessing (100ms)
-
-        // Start stale event cleanup timer if enabled
         if (staleCleanupEnabled) {
-          timers.startTimerWithFixedDelay(PerformStaleCleanup, cleanupInterval)
+          context.self ! PerformStaleCleanup
+          timers.startSingleTimer(PerformStaleCleanup, cleanupInterval)
           context.log.info(
             s"Stale event cleanup enabled (timeout: $staleTimeoutMinutes minutes, interval: $cleanupInterval)"
           )
@@ -209,13 +207,14 @@ class OutboxProcessor(
     case CleanupComplete(count) =>
       if (count > 0) {
         context.log.info(s"Successfully reset $count stale events to PENDING")
+        context.self ! ProcessUnhandledEvent
       }
       Behaviors.same
     case CleanupFailed(ex) =>
       context.log.error("Failed to run stale event cleanup", ex)
       Behaviors.same
   }
-  // handler for graceful shutdown
+
   private val stopHandler: PartialFunction[Command, Behavior[Command]] = { case Stop(replyTo) =>
     context.log.info("Stopping")
     timers.cancelAll()
@@ -226,22 +225,15 @@ class OutboxProcessor(
 
   private given ExecutionContext = context.executionContext
 
-  private def scheduleNext(): Unit = {
-    // Only used in polling mode (when useListenNotify is false)
-    timers.startSingleTimer(ProcessUnhandledEvent, pollInterval)
-  }
+  private def scheduleNext(): Unit =
 
-  private def pipeToSelf[T](fut: => Future[T])(onSuccess: T => Command): Unit =
-    context.pipeToSelf(fut) {
-      case Success(v) => onSuccess(v)
-      case Failure(ex) => ProcessingFailed(ex)
-    }
+    timers.startSingleTimer(ProcessUnhandledEvent, pollInterval)
 
   private def idle: Behavior[Command] = Behaviors.receiveMessage {
     case ProcessUnhandledEvent =>
       context.log.debug("Received ProcessUnhandledEvent")
       context.log.debug("Processing unhandled outbox events")
-      pipeToSelf(processOutboxBatch())(stats => ProcessingComplete(stats))
+      pipeToSelf(processOutboxBatch)(stats => ProcessingComplete(stats), e => ProcessingFailed(e))
       stash.unstashAll(processing)
     case other =>
       cleanupHandler
@@ -298,7 +290,7 @@ class OutboxProcessor(
         )
   }
 
-  private def processOutboxBatch(): Future[Stats] = {
+  private def processOutboxBatch: Future[Stats] = {
     logger.info(s"Fetching up to $batchSize unprocessed events")
     db.run(outboxRepo.findAndClaimUnprocessed(batchSize))
       .flatMap { events =>
@@ -344,12 +336,9 @@ class OutboxProcessor(
       _ <- outboxRepo.setError(event.id, error)
       _ <-
         if (shouldDLQ) {
-          // Don't increment retry count when moving to DLQ
-          // moveToDLQ will set status to PROCESSED
           log.warn(s"Event ${event.id} exceeded retries ($maxRetries), moving to DLQ")
           outboxRepo.moveToDLQ(event, "MAX_RETRIES_EXCEEDED", error)
         } else {
-          // Increment retry count and set status back to PENDING for retry
           outboxRepo.incrementRetryCount(event.id, error).map(_ => 0L)
         }
     } yield false
@@ -367,22 +356,26 @@ class OutboxProcessor(
   }
 
   private def performStaleCleanup(): Unit = {
-    val cleanupFuture = for {
-      staleCount <- db.run(outboxRepo.countStaleProcessingEvents(staleTimeoutMinutes))
+    val action = for {
+      staleCount <- outboxRepo.countStaleProcessingEvents(staleTimeoutMinutes)
       resetCount <-
         if (staleCount > 0) {
           logger.warn(
             s"Found $staleCount stale PROCESSING events (timeout: $staleTimeoutMinutes minutes), resetting to PENDING"
           )
-          db.run(outboxRepo.resetStaleProcessingEvents(staleTimeoutMinutes))
+          outboxRepo.resetStaleProcessingEvents(staleTimeoutMinutes)
         } else {
-          Future.successful(0)
+          DBIO.successful(0)
         }
     } yield resetCount
-
-    context.pipeToSelf(cleanupFuture) {
-      case Success(count) => CleanupComplete(count)
-      case Failure(ex) => CleanupFailed(ex)
-    }
+    pipeToSelf(db.run(action))(count => CleanupComplete(count), e => CleanupFailed(e))
   }
+
+  private def pipeToSelf[T](
+      fut: => Future[T]
+  )(onSuccess: T => Command, onFailure: Throwable => Command): Unit =
+    context.pipeToSelf(fut) {
+      case Success(v) => onSuccess(v)
+      case Failure(ex) => onFailure(ex)
+    }
 }
