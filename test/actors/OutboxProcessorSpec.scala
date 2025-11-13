@@ -50,7 +50,8 @@ class OutboxProcessorSpec
         destinationName = "mock-destination",
         revert          = None
       )
-    override def routeEventToMultiple(event: OutboxEvent): List[HttpEndpointConfig] = List.empty
+    override def routeEventToDestinations(event: OutboxEvent): List[publishers.RoutedDestination] = List.empty
+    override def findRevertConfig(baseDestination: String, forwardUrl: String): Option[publishers.RevertConfig] = None
   }
 
   // Ensure test configuration is used

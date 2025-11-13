@@ -19,7 +19,7 @@ trait AggregateEvent {
     payloads.get(destinationName).flatMap(_.payload)
 
   /** Gets the path parameters for a specific destination.
-    * Returns empty map if no destination exists.
+    * Returns an empty map if no destination exists.
     */
   def getPathParamsFor(destinationName: String): Map[String, String] =
     payloads.get(destinationName).map(_.pathParams).getOrElse(Map.empty)

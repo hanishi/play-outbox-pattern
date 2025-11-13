@@ -18,7 +18,7 @@ class OrderController @Inject() (
     orderService: OrderService,
     outboxRepo: OutboxRepository,
     dlqRepo: DeadLetterRepository,
-    db: Database
+    db: Database // used with JSON API endpoints
 )(using ec: ExecutionContext)
     extends AbstractController(cc) {
 
@@ -101,82 +101,154 @@ class OrderController @Inject() (
         } else {
           val html = ordersWithResults
             .map { case models.OrderWithResults(order, results) =>
-              // Check if all non-REVERT destinations succeeded (needed to enable Ship/Cancel buttons)
-              val publishResults = results.filter(!_.eventType.endsWith(":REVERT"))
-              val allSucceeded   = publishResults.nonEmpty && publishResults.forall(_.success)
+              val publishResults = results
+                .filter(r => !r.eventType.endsWith(":REVERT") && !r.destination.endsWith(".revert"))
+              val allSucceeded = publishResults.nonEmpty && publishResults.forall(_.success)
 
-              // Check if revert operations have been executed (compensation completed)
-              val hasRevertEvents = results.exists(_.eventType.endsWith(":REVERT"))
+              val revertResults = results
+                .filter(r => r.eventType.endsWith(":REVERT") || r.destination.endsWith(".revert"))
+              val hasReverts = revertResults.nonEmpty
 
-              val isFinal     = order.orderStatus == "SHIPPED" || order.orderStatus == "CANCELLED"
-              val canRemove   = isFinal || hasRevertEvents
-              val buttonsHtml =
-                if (canRemove) s"""
+              val allFailed = publishResults.nonEmpty && publishResults.forall(!_.success)
+
+              val buttonsHtml = order.orderStatus match {
+                case "DELIVERED" =>
+                  // Order delivered - show remove button
+                  s"""
             <div class="order-actions">
               <button class="btn-danger" hx-delete="/orders/${order.id}/delete" hx-target="#orders" hx-swap="innerHTML">Remove</button>
             </div>
             """
-                else if (allSucceeded)
+                case "SHIPPED" =>
+                  // Order shipped - allow marking as delivered (triggers review request notification)
                   s"""
             <div class="order-actions">
-              <button class="btn-secondary" hx-put="/orders/${order.id}/status" hx-vals='{"status":"SHIPPED"}' hx-target="#orders" hx-swap="innerHTML">Ship</button>
+              <button class="btn-secondary" hx-put="/orders/${order.id}/status" hx-target="#orders" hx-swap="innerHTML" hx-vals='{"status":"DELIVERED"}'>📦 Mark as Delivered</button>
+              <button class="btn-danger" hx-delete="/orders/${order.id}/delete" hx-target="#orders" hx-swap="innerHTML">Remove</button>
+            </div>
+            """
+                case "CANCELLED" =>
+                  s"""
+            <div class="order-actions">
+              <button class="btn-danger" hx-delete="/orders/${order.id}/delete" hx-target="#orders" hx-swap="innerHTML">Remove</button>
+            </div>
+            """
+                case "PENDING" if publishResults.isEmpty =>
+                  // No results yet - order just created, still processing
+                  s"""
+            <div class="order-actions">
+              <div style="font-size: 0.875rem; color: #6B7280; font-style: italic;">Publishing in progress...</div>
+            </div>
+            """
+                case "PENDING" if allSucceeded =>
+                  // Forward events succeeded - allow marking as shipped (triggers shipping confirmation notification)
+                  s"""
+            <div class="order-actions">
+              <button class="btn-secondary" hx-put="/orders/${order.id}/status" hx-target="#orders" hx-swap="innerHTML" hx-vals='{"status":"SHIPPED"}'>🚚 Mark as Shipped</button>
               <button class="btn-danger" hx-delete="/orders/${order.id}/cancel" hx-target="#orders" hx-swap="innerHTML">Cancel</button>
             </div>
             """
-                else
+                case "PENDING" if allFailed =>
+                  // All forward events failed - allow remove/retry
                   s"""
             <div class="order-actions">
-              <div style="font-size: 0.75rem; color: #EF4444; font-style: italic;">Publishing failed - actions disabled</div>
+              <button class="btn-danger" hx-delete="/orders/${order.id}/delete" hx-target="#orders" hx-swap="innerHTML">Remove</button>
             </div>
             """
+                case "PENDING" if hasReverts =>
+                  s"""
+            <div class="order-actions">
+              <button class="btn-danger" hx-delete="/orders/${order.id}/delete" hx-target="#orders" hx-swap="innerHTML">Remove</button>
+            </div>
+            """
+                case _ =>
+                  s"""
+            <div class="order-actions">
+              <div style="font-size: 0.875rem; color: #EF4444; font-style: italic;">Processing...</div>
+            </div>
+            """
+              }
 
               val resultsHtml = if (results.nonEmpty) {
-                val resultsDetails = results
-                  .sortBy(r =>
-                    (!r.eventType.endsWith(":REVERT"), r.destination)
-                  ) // Show original attempts first, then reverts
-                  .map { result =>
-                    val isRevert    = result.eventType.endsWith(":REVERT")
-                    val statusColor = if (result.success) "#10B981" else "#EF4444"
-                    val statusIcon  = if (result.success) "✓" else "✗"
-                    val statusCode  = result.responseStatus.map(c => s" ($c)").getOrElse("")
-                    val eventLabel  =
-                      if (isRevert)
-                        s"<span style=\"color: #9333EA; font-weight: 600;\">[REVERT]</span> "
-                      else ""
-                    val errorMsg = result.errorMessage
-                      .map(msg =>
-                        s"<div style=\"font-size: 0.75rem; color: #EF4444; margin-top: 0.25rem;\">${msg
-                            .take(50)}${if (msg.length > 50) "..." else ""}</div>"
-                      )
-                      .getOrElse("")
-                    s"""
-                  <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0;">
-                    <span style="color: $statusColor; font-weight: bold;">$statusIcon</span>
-                    <span style="font-size: 0.813rem;">$eventLabel${result.destination}$statusCode</span>
-                    $errorMsg
-                  </div>
-                """
-                  }
-                  .mkString("\n")
+                // Group results by event type to show which API calls belong to which event
+                val resultsByEvent = results
+                  .groupBy(r => if (r.eventType.endsWith(":REVERT")) r.eventType.replace(":REVERT", "") + ":REVERT" else r.eventType)
+                  .toSeq
+                  .sortBy(_._2.headOption.map(_.publishedAt.toEpochMilli).getOrElse(0L))
 
-                s"""
-            <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #E5E7EB;">
-              <div style="font-size: 0.75rem; color: #6B7280; margin-bottom: 0.5rem;">
-                Event: ${results.headOption
-                    .map(_.eventType.replace(":REVERT", ""))
-                    .getOrElse("Unknown")}
+                resultsByEvent.map { case (eventType, eventResults) =>
+                  val isRevertEvent = eventType.endsWith(":REVERT")
+                  val cleanEventType = eventType.replace(":REVERT", "")
+
+                  val deduplicatedResults = eventResults
+                    .groupBy(_.destination)
+                    .map { case (_, destResults) =>
+                      destResults.maxBy(_.publishedAt)
+                    }
+                    .toSeq
+                    .sortBy(_.fanoutOrder)
+
+                  val resultsDetails = deduplicatedResults
+                    .map { result =>
+                      val statusColor = if (result.success) "#10B981" else "#EF4444"
+                      val statusIcon  = if (result.success) "✓" else "✗"
+                      val statusCode  = result.responseStatus.map(c => s" ($c)").getOrElse("")
+                      val displayDestination =
+                        if (result.destination.endsWith(".revert"))
+                          result.destination.stripSuffix(".revert")
+                        else
+                          result.destination
+                      val errorMsg = result.errorMessage
+                        .map(msg =>
+                          s"<div style=\"font-size: 0.75rem; color: #EF4444; margin-top: 0.25rem;\">${msg
+                              .take(50)}${if (msg.length > 50) "..." else ""}</div>"
+                        )
+                        .getOrElse("")
+                      s"""
+                    <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0;">
+                      <span style="color: $statusColor; font-weight: bold;">$statusIcon</span>
+                      <span style="font-size: 0.813rem;">$displayDestination$statusCode</span>
+                      $errorMsg
+                    </div>
+                  """
+                    }
+                    .mkString("\n")
+
+                  val eventEmoji = cleanEventType match {
+                    case "OrderCreated" => "✨"
+                    case "OrderStatusUpdated" => "🔄"
+                    case "OrderCancelled" => "❌"
+                    case _ => "📋"
+                  }
+
+                  val eventLabel = if (isRevertEvent) {
+                    s"""<span style="color: #9333EA; font-weight: 600;">$eventEmoji Event: $cleanEventType [REVERT]</span>"""
+                  } else {
+                    s"$eventEmoji Event: $cleanEventType"
+                  }
+
+                  s"""
+              <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #E5E7EB;">
+                <div style="font-size: 0.75rem; color: #6B7280; margin-bottom: 0.5rem;">
+                  $eventLabel
+                </div>
+                $resultsDetails
               </div>
-              $resultsDetails
-            </div>
-            """
+              """
+                }.mkString("\n")
               } else ""
+
+              val statusBadge = order.orderStatus match {
+                case "PENDING" => "" // Don't show PENDING status
+                case status =>
+                  s"""<span class="order-status status-${status.toLowerCase}">$status</span>"""
+              }
 
               s"""
           <div class="order-item">
             <div class="order-header">
               <span class="order-id">Order #${order.id}</span>
-              <span class="order-status status-${order.orderStatus.toLowerCase}">${order.orderStatus}</span>
+              $statusBadge
             </div>
             <div style="color: #718096; font-size: 0.875rem;">
               <div>Customer: ${order.customerId}</div>
@@ -217,6 +289,7 @@ class OrderController @Inject() (
       )
       successful <- db.run(outboxRepo.countSuccessfullyProcessed)
       dlqTotal <- db.run(dlqRepo.countAll)
+      dlqPending <- db.run(dlqRepo.countPending)
       dlqMaxRetries <- db.run(dlqRepo.countByReason("MAX_RETRIES_EXCEEDED"))
       dlqNonRetryable <- db.run(dlqRepo.countByReason("NON_RETRYABLE_ERROR"))
     } yield {
@@ -225,10 +298,12 @@ class OrderController @Inject() (
       <div class="stat-grid">
         <div class="stat">
           <div class="stat-value">$totalPendingAndProcessing</div>
-          <div class="stat-label">Queued Events</div>
+          <div class="stat-label">Outbox Queue</div>
           ${
           if (processing > 0)
-            s"""<div style="font-size: 0.75rem; color: #4299e1; margin-top: 0.25rem;">Processing: $processing</div>"""
+            s"""<div style="font-size: 0.75rem; color: #4299e1; margin-top: 0.25rem;">Processing: $processing | Pending: $pending</div>"""
+          else if (pending > 0)
+            s"""<div style="font-size: 0.75rem; color: #6B7280; margin-top: 0.25rem;">Pending: $pending</div>"""
           else ""
         }
         </div>
@@ -238,7 +313,7 @@ class OrderController @Inject() (
           <div class="stat-value" style="color: ${
           if (successful > 0) "#16A34A" else "#1F2937"
         };">$successful</div>
-          <div class="stat-label">Successfully Published</div>
+          <div class="stat-label">Events Published</div>
         </div>
         <div class="stat" style="background: ${
           if (dlqTotal > 0) "#FEF2F2" else "white"
@@ -249,7 +324,9 @@ class OrderController @Inject() (
           <div class="stat-label">Dead Letter Queue</div>
           ${
           if (dlqTotal > 0)
-            s"""<div style="font-size: 0.75rem; color: #991B1B; margin-top: 0.25rem;">Max Retries: $dlqMaxRetries | Non-Retryable: $dlqNonRetryable</div>"""
+            s"""<div style="font-size: 0.75rem; color: #991B1B; margin-top: 0.25rem;">${
+                if (dlqPending > 0) s"Pending: $dlqPending | " else ""
+              }Failed: ${dlqMaxRetries + dlqNonRetryable}</div>"""
           else ""
         }
         </div>
@@ -361,13 +438,13 @@ class OrderController @Inject() (
 
   def deleteOrderJson(id: Long): Action[AnyContent] = Action.async {
     orderService
-      .deleteOrder(id)
+      .cancelOrder(id, "Cancelled via API")
       .map { _ =>
         Ok(
           Json.obj(
             "success" -> true,
             "orderId" -> id,
-            "message" -> s"Order #$id deleted successfully"
+            "message" -> s"Order #$id cancelled successfully"
           )
         )
       }

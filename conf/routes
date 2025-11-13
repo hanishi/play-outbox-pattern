@@ -1,61 +1,88 @@
 # Routes
-GET           /                                                           controllers.HomeController.index
 
-# Documentation
-GET           /docs/*file                                                 controllers.Assets.at(path="/public/docs", file)
+# ============================================================================
+# Main Application
+# ============================================================================
+GET           /                                                 controllers.HomeController.index
 
-# HTMX
-POST          /orders                                                     controllers.OrderController.createOrder
-GET           /orders                                                     controllers.OrderController.listOrders
-GET           /outbox/stats                                               controllers.OrderController.outboxStats
-PUT           /orders/:id/status                                          controllers.OrderController.updateStatus(id: Long)
-DELETE        /orders/:id/cancel                                          controllers.OrderController.cancelOrder(id: Long)
-DELETE        /orders/:id/delete                                          controllers.OrderController.deleteOrder(id: Long)
+# ============================================================================
+# Order Management (HTMX)
+# ============================================================================
+POST          /orders                                           controllers.OrderController.createOrder
+GET           /orders                                           controllers.OrderController.listOrders
+GET           /outbox/stats                                     controllers.OrderController.outboxStats
+PUT           /orders/:id/status                                controllers.OrderController.updateStatus(id: Long)
+DELETE        /orders/:id/cancel                                controllers.OrderController.cancelOrder(id: Long)
+DELETE        /orders/:id/delete                                controllers.OrderController.deleteOrder(id: Long)
 
-# JSON API
-POST          /api/orders                                                 controllers.OrderController.createOrderJson
-GET           /api/orders                                                 controllers.OrderController.listOrdersJson
-GET           /api/outbox/stats                                           controllers.OrderController.outboxStatsJson
-GET           /api/outbox/events                                          controllers.OrderController.listAllEventsJson
-GET           /api/outbox/events/:id                                      controllers.OrderController.debugEventJson(id: Long)
-PUT           /api/orders/:id/status                                      controllers.OrderController.updateStatusJson(id: Long)
-DELETE        /api/orders/:id/cancel                                      controllers.OrderController.cancelOrderJson(id: Long)
-DELETE        /api/orders/:id                                             controllers.OrderController.deleteOrderJson(id: Long)
+# ============================================================================
+# Order Management (JSON API)
+# ============================================================================
+POST          /api/orders                                       controllers.OrderController.createOrderJson
+GET           /api/orders                                       controllers.OrderController.listOrdersJson
+GET           /api/outbox/stats                                 controllers.OrderController.outboxStatsJson
+GET           /api/outbox/events                                controllers.OrderController.listAllEventsJson
+GET           /api/outbox/events/:id                            controllers.OrderController.debugEventJson(id: Long)
+PUT           /api/orders/:id/status                            controllers.OrderController.updateStatusJson(id: Long)
+DELETE        /api/orders/:id/cancel                            controllers.OrderController.cancelOrderJson(id: Long)
+DELETE        /api/orders/:id                                   controllers.OrderController.deleteOrderJson(id: Long)
 
-# Webhook Simulator
-GET           /simulator/stats                                            controllers.WebhookSimulatorController.stats
-POST          /simulator/webhook/inventory                                controllers.WebhookSimulatorController.inventoryWebhook
-DELETE        /simulator/webhook/inventory/:id                            controllers.WebhookSimulatorController.inventoryRevert(id: String)
-POST          /simulator/webhook/shipping                                 controllers.WebhookSimulatorController.shippingWebhook
-POST          /simulator/webhook/shipping/:id/cancel                      controllers.WebhookSimulatorController.shippingRevert(id: String)
-POST          /simulator/webhook/billing                                  controllers.WebhookSimulatorController.billingWebhook
-POST          /simulator/webhook/billing/:id/refund                       controllers.WebhookSimulatorController.billingRevert(id: String)
-POST          /simulator/webhook/email                                    controllers.WebhookSimulatorController.alwaysFail
-POST          /simulator/webhook/email/:id/cancel                         controllers.WebhookSimulatorController.emailRevert(id: String)
+# ============================================================================
+# Inventory Service API
+# ============================================================================
+POST          /api/inventory/reserve                            controllers.InventoryController.reserve
+POST          /api/inventory/reserve/succeed                    controllers.InventoryController.reserveSucceed
+POST          /api/inventory/reserve/fail                       controllers.InventoryController.reserveFail
+DELETE        /api/inventory/:id/release                        controllers.InventoryController.release(id: String)
+DELETE        /api/inventory/release/succeed                    controllers.InventoryController.releaseSucceed
+DELETE        /api/inventory/release/fail                       controllers.InventoryController.releaseFail
 
-# Retry-After demo endpoints
-GET           /simulator/github/repos                                     controllers.WebhookSimulatorController.githubRateLimited
-POST          /simulator/stripe/charges                                   controllers.WebhookSimulatorController.stripeRateLimited
-POST          /simulator/custom/process                                   controllers.WebhookSimulatorController.customApiUnavailable
+# ============================================================================
+# Billing Service API
+# ============================================================================
+POST          /api/billing                                      controllers.BillingController.charge
+POST          /api/billing/succeed                              controllers.BillingController.chargeSucceed
+POST          /api/billing/fail                                 controllers.BillingController.chargeFail
+POST          /api/billing/:id/refund                           controllers.BillingController.refund(id: String)
+POST          /api/billing/refund/succeed                       controllers.BillingController.refundSucceed
+POST          /api/billing/refund/fail                          controllers.BillingController.refundFail
 
-# Conditional routing demo endpoints
-POST          /simulator/fraud/check                                      controllers.WebhookSimulatorController.fraudCheck
-POST          /simulator/webhook/domestic-shipping                        controllers.WebhookSimulatorController.domesticShippingWebhook
-POST          /simulator/webhook/domestic-shipping/:id/cancel             controllers.WebhookSimulatorController.domesticShippingRevert(id: String)
-POST          /simulator/webhook/international-shipping                   controllers.WebhookSimulatorController.internationalShippingWebhook
-POST          /simulator/webhook/international-shipping/:id/cancel        controllers.WebhookSimulatorController.internationalShippingRevert(id: String)
-POST          /simulator/webhook/high-value                               controllers.WebhookSimulatorController.highValueProcessing
+# ============================================================================
+# Shipping Service API
+# ============================================================================
+POST          /api/domestic-shipping                            controllers.ShippingController.createDomesticShipment
+POST          /api/domestic-shipping/succeed                    controllers.ShippingController.createDomesticShipmentSucceed
+POST          /api/domestic-shipping/fail                       controllers.ShippingController.createDomesticShipmentFail
+POST          /api/domestic-shipping/:id/cancel                 controllers.ShippingController.cancelDomesticShipment(id: String)
+POST          /api/domestic-shipping/cancel/succeed             controllers.ShippingController.cancelDomesticShipmentSucceed
+POST          /api/domestic-shipping/cancel/fail                controllers.ShippingController.cancelDomesticShipmentFail
+POST          /api/international-shipping                       controllers.ShippingController.createInternationalShipment
+POST          /api/international-shipping/succeed               controllers.ShippingController.createInternationalShipmentSucceed
+POST          /api/international-shipping/fail                  controllers.ShippingController.createInternationalShipmentFail
+POST          /api/international-shipping/:id/cancel            controllers.ShippingController.cancelInternationalShipment(id: String)
+POST          /api/international-shipping/cancel/succeed        controllers.ShippingController.cancelInternationalShipmentSucceed
+POST          /api/international-shipping/cancel/fail           controllers.ShippingController.cancelInternationalShipmentFail
 
-# Generic webhook endpoints (catch-all)
-POST          /simulator/webhook/*path                                    controllers.WebhookSimulatorController.webhook(path: String)
-PUT           /simulator/webhook/*path                                    controllers.WebhookSimulatorController.webhook(path: String)
-PATCH         /simulator/webhook/*path                                    controllers.WebhookSimulatorController.webhook(path: String)
-DELETE        /simulator/webhook/*path                                    controllers.WebhookSimulatorController.webhook(path: String)
+# ============================================================================
+# Fraud Check Service API
+# ============================================================================
+POST          /api/fraud/check                                  controllers.FraudCheckController.check
+POST          /api/fraud/check/succeed                          controllers.FraudCheckController.checkSucceed
+POST          /api/fraud/check/fail                             controllers.FraudCheckController.checkFail
 
-# Test endpoints
-POST          /simulator/always-succeed                                   controllers.WebhookSimulatorController.alwaysSucceed
-PUT           /simulator/always-succeed                                   controllers.WebhookSimulatorController.alwaysSucceed
-POST          /simulator/always-fail                                      controllers.WebhookSimulatorController.alwaysFail
-POST          /simulator/always-400                                       controllers.WebhookSimulatorController.alwaysBadRequest
-POST          /simulator/always-429                                       controllers.WebhookSimulatorController.alwaysRateLimited
-POST          /simulator/always-503                                       controllers.WebhookSimulatorController.alwaysUnavailable
+# ============================================================================
+# High-Value Processing Service API
+# ============================================================================
+POST          /api/high-value-processing                        controllers.HighValueProcessingController.process
+POST          /api/high-value-processing/succeed                controllers.HighValueProcessingController.processSucceed
+POST          /api/high-value-processing/fail                   controllers.HighValueProcessingController.processFail
+POST          /api/high-value-processing/:id/cancel             controllers.HighValueProcessingController.cancel(id: String)
+POST          /api/high-value-processing/cancel/succeed         controllers.HighValueProcessingController.cancelSucceed
+POST          /api/high-value-processing/cancel/fail            controllers.HighValueProcessingController.cancelFail
+
+# ============================================================================
+# Notification Service API (triggered by status updates)
+# ============================================================================
+POST          /api/notifications/shipping-confirmation          controllers.NotificationController.shippingConfirmation
+POST          /api/notifications/review-request                 controllers.NotificationController.reviewRequest
+POST          /api/notifications/status-update                  controllers.NotificationController.statusUpdate

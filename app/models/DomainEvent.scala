@@ -9,7 +9,7 @@ sealed trait DomainEvent {
   def eventType: String
 
   /** Returns destination-specific configurations (payload + path params) for fan-out publishing.
-    * Default implementation creates a single config with payload only, mapped to the event type.
+    * The default implementation creates a single config with payload only, mapped to the event type.
     * Override this method to provide different payloads and path params for different destinations.
     *
     * Example:
@@ -49,6 +49,7 @@ case class OrderCreatedEvent(
 
     "inventory" -> DestinationConfig(
       payload = Some(Json.obj(
+        "orderId" -> orderId,           // Added: required by InventoryController
         "totalAmount" -> totalAmount,
         "shippingType" -> shippingType,
         "timestamp" -> timestamp.toString
@@ -104,8 +105,32 @@ case class OrderStatusUpdatedEvent(
   override def aggregateId: String = orderId.toString
   override def eventType: String   = "OrderStatusUpdated"
 
+  /** Destination-specific payloads for status update notifications.
+    * Notifications service uses conditional routing to send different messages based on newStatus.
+    */
+  override def toPayloads: Map[String, DestinationConfig] = Map(
+    "OrderStatusUpdated" -> DestinationConfig(
+      payload    = Some(toPayload),
+      pathParams = Map("orderId" -> orderId.toString)
+    ),
+
+    // Notifications service - receives status info and routes based on newStatus
+    // Routes to: shipping-confirmation (SHIPPED), review-request (DELIVERED), or status-update (other)
+    "notifications" -> DestinationConfig(
+      payload = Some(
+        Json.obj(
+          "orderId"   -> orderId,
+          "oldStatus" -> oldStatus,
+          "newStatus" -> newStatus,
+          "timestamp" -> timestamp.toString
+        )
+      ),
+      pathParams = Map("orderId" -> orderId.toString)
+    )
+  )
+
   override def toPayload: JsValue = Json.obj(
-    "orderId" -> orderId,
+    "orderId"   -> orderId,
     "oldStatus" -> oldStatus,
     "newStatus" -> newStatus,
     "timestamp" -> timestamp.toString
@@ -118,7 +143,7 @@ case class OrderCancelledEvent(
     timestamp: Instant = Instant.now()
 ) extends DomainEvent {
   override def aggregateId: String = orderId.toString
-  override def eventType: String   = "OrderCancelled"
+  override def eventType: String   = "!OrderCreated"  // ! prefix triggers automatic compensation
 
   override def toPayload: JsValue = Json.obj(
     "orderId" -> orderId,

@@ -36,11 +36,7 @@ class OutboxIntegrationSpec
         "outbox.useListenNotify" -> false,
         "outbox.enableStaleEventCleanup" -> false,
         "outbox.cleanupInterval" -> "1 minute",
-        "outbox.staleEventTimeoutMinutes" -> 5,
-        "outbox.http.routes.OrderCreated.url" -> "http://localhost:9000/simulator/always-succeed",
-        "simulator.failureRate" -> 0.0,
-        "simulator.slowResponseRate" -> 0.0,
-        "simulator.slowResponseDelayMs" -> 0
+        "outbox.staleEventTimeoutMinutes" -> 5
       )
       .build()
 

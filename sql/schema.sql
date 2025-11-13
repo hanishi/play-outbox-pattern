@@ -96,7 +96,8 @@ CREATE TABLE aggregate_results
     published_at     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     duration_ms      INT,                               -- Time taken for the request in milliseconds
     success          BOOLEAN                  NOT NULL, -- Whether the request was successful
-    error_message    TEXT                               -- Error message if failed
+    error_message    TEXT,                              -- Error message if failed
+    fanout_order     INT                      NOT NULL DEFAULT 0 -- Position in fanout configuration order
 );
 
 -- Unique constraint to ensure only one result per aggregate+destination+event_type (enables UPSERT)
@@ -115,6 +116,9 @@ CREATE INDEX idx_aggregate_results_published_at ON aggregate_results (published_
 
 -- Index for querying failures
 CREATE INDEX idx_aggregate_results_failures ON aggregate_results (success, published_at DESC) WHERE success = false;
+
+-- Index for sorting by fanout order
+CREATE INDEX idx_aggregate_results_fanout_order ON aggregate_results (aggregate_id, fanout_order);
 
 -- GIN index for efficient JSONB queries
 CREATE INDEX idx_aggregate_results_request_gin ON aggregate_results USING GIN (request_payload);
