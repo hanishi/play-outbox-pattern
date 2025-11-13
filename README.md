@@ -1,80 +1,100 @@
-# Pekko Actors for Background Processing in Play Framework
+# Transactional Outbox + Saga Compensation Pattern
 
-> Demonstrating Pekko Actors as background processors in Play Framework, 
-> using Transactional Outbox + Orchestration-based Saga Pattern as a practical example
+Reference implementation solving the dual-write problem with automatic compensation.
 
-**Built with**: Scala 3 · Play Framework 3.0 · PostgreSQL · **Pekko Actors**
+[![Scala](https://img.shields.io/badge/Scala-3.3.6-red.svg)](https://www.scala-lang.org/)
+[![Apache Pekko](https://img.shields.io/badge/Apache%20Pekko-1.0.3-blue.svg)](https://pekko.apache.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16.10-blue.svg)](https://www.postgresql.org/)
 
-## What This Demonstrates
+## Overview
 
-This project shows **one way to implement background processing using Pekko Actors** in Play Framework, 
-through a real-world use case: reliable event delivery with automatic compensation.
+Accompanies blog post: *
+*[Never Call APIs Inside Database Transactions](https://rockthejvm.com/articles/never-call-apis-inside-database-transactions)
+**
 
-### The Use Case: Outbox + Saga Pattern
+**Problem:** External API succeeds, DB transaction fails → irrecoverable inconsistency
 
-When building microservices, you need to:
-1. Save data to your database
-2. Notify other services about the change
+**Solution:**
 
-**The catch**: What if the notification fails? What if some services succeed and others fail?
-
-### Why Pekko Actors for This?
-
-- 🎭 **Message-Driven**: React to database LISTEN/NOTIFY events instantly (not just polling)
-- 🎭 **Clean Lifecycle**: Actors start/stop cleanly with Play's `ApplicationLifecycle`
-- 🎭 **State Management**: Actors naturally hold state (timers, retry schedules)
-- 🎭 **Thread-Safe**: Actor message processing avoids concurrency bugs
-- 🎭 **Natural Fit**: Works well with Play's async, non-blocking model
+- **Transactional Outbox** - Write events atomically with business data
+- **Result Table** - Track every API call for compensation
+- **Saga** - Automatically undo partial failures
 
 ## Quick Start
 
 ```bash
-# 1. Start PostgreSQL
+# Start PostgreSQL
 docker-compose up -d postgres
 
-# 2. Run the app
+# Run the app
 sbt run
-
-# 3. Open http://localhost:9000
+# Open http://localhost:9000
 ```
-Create an order in the UI and watch the automatic rollback when payment fails!
+
+### Trigger Compensation
+
+Edit `conf/application.conf`:
+
+```hocon
+service.failure.rates.billing.charge = 1.0  # Force billing failures
+```
+
+Create an order - watch automatic compensation in logs:
+
+```
+[info] ✓ inventory → 200 OK
+[info] ✓ shipping → 200 OK
+[warn] ❌ billing → 503 (attempt 3/3)
+[info] DLQProcessor - Compensation: [shipping, inventory]
+[info] ✓ shipping.revert → 200 OK (cancelled)
+[info] ✓ inventory.revert → 200 OK (released)
+```
 
 ## Key Features
 
-- **Reliable Delivery**: Events saved transactionally, delivered with retries respecting Retry-After headers
-- **Automatic Saga Compensation**: Partial failures trigger automatic rollback (LIFO order)
-- **Conditional Routing**: Route events to different endpoints based on payload conditions
-- **Fan-out**: Single event → multiple http endpoints
-- **Dead Letter Queue**: Failed events moved to DLQ with automatic revert operations
-- **PostgreSQL LISTEN/NOTIFY**: Near-instant processing
-- **Crash-Safe**: Events are durable, processing resumes on restart
+- **PostgreSQL LISTEN/NOTIFY** for instant event processing
+- **Configuration-driven compensation** - no code changes for new endpoints
+- **Conditional routing** based on previous API responses
+- **Rate limit handling** with Retry-After headers
+- **Automatic + manual compensation** flows
+- **Complete audit trail** in `aggregate_results` table
 
-## Example Scenario
+## Configuration Example
 
+```hocon
+inventory {
+  url = "http://localhost:9000/api/inventory/reserve"
+  revert {
+    url = "http://localhost:9000/api/inventory/{reservationId}/release"
+    method = "DELETE"
+    extract.reservationId = "response:$.reservationId"
+  }
+}
+
+# Conditional routing based on fraud check
+billing.routes = [{
+  url = "http://localhost:9000/api/billing"
+  condition {
+    jsonPath = "$.riskScore"
+    operator = "lt"
+    value = "50"
+    previousDestination = "fraudCheck"
+  }
+}]
 ```
-Order Created → Warehouse ✅ → Shipping ✅ → Payment ❌
 
-Automatic Rollback:
-  Payment failed → Cancel Shipping ✅ → Release Inventory ✅
-```
+## Learn More
 
-## Architecture
-
-### Orchestration-based Saga
-This project uses **orchestration** (centralized coordinator) rather than **choreography** (event-driven):
-
-```
-Orchestrator (OutboxProcessor + DLQProcessor)
-  ↓
-  ├→ Inventory Service (reserve) ✅
-  ├→ Shipping Service (schedule) ✅
-  ├→ Payment Service (charge) ❌ FAILS
-  ↓
-  DLQ triggers compensation (reverse order):
-  ├→ Shipping Service (cancel) ✅
-  └→ Inventory Service (release) ✅
-```
+- 📖 [Blog Post](https://rockthejvm.com/articles/never-call-apis-inside-database-transactions)
 
 ## License
 
-MIT License - see LICENSE file for details
+This work is licensed under
+a [Creative Commons Attribution 4.0 International License](https://creativecommons.org/licenses/by/4.0/).
+
+[![CC BY 4.0](https://licensebuttons.net/l/by/4.0/88x31.png)](https://creativecommons.org/licenses/by/4.0/)
+
+**You are free to:**
+
+- **Share** — copy and redistribute the material
+- **Adapt** — remix, transform, and build upon the material for any purpose
